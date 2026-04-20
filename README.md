@@ -320,5 +320,4 @@ MIT License — see [LICENSE](LICENSE)
 <p align="center">
   ⭐ Star us on GitHub if you find this project useful! ⭐
 </p>
-#   H G V C S  
- 
+#

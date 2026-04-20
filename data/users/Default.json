@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "name": "Default",
+  "created": "2026-04-15T01:28:50",
+  "updated": "2026-04-15T01:28:50",
+  "confidence_overrides": {},
+  "action_overrides": {},
+  "custom_macros": [],
+  "calibration": {},
+  "stats": {
+    "total_gestures": 0,
+    "gesture_counts": {},
+    "session_count": 0,
+    "total_runtime_s": 0
+  },
+  "prefs": {
+    "theme": "dark",
+    "show_hud": true,
+    "cursor_enabled": true,
+    "hud_opacity": 0.8
+  }
+}

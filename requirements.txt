@@ -1,0 +1,59 @@
+# ══════════════════════════════════════════════════════════
+# HGVCS Requirements
+# ══════════════════════════════════════════════════════════
+
+# Core
+numpy>=1.21.0
+opencv-python>=4.5.0
+Pillow>=9.0.0
+PyYAML>=6.0
+
+# Gesture Recognition (MediaPipe Tasks API)
+mediapipe>=0.10.5
+scikit-learn>=1.2.0
+
+# Voice Recognition — STT
+openai-whisper>=20230314
+sounddevice>=0.4.6        # microphone capture (replaces pyaudio)
+
+# Voice — TTS (female neural voice)
+edge-tts>=6.1.9           # Microsoft Edge TTS, en-US-AriaNeural
+pyttsx3>=2.90             # offline fallback TTS
+pygame>=2.5.0             # audio playback for edge-tts mp3 output
+
+# Voice — Ollama LLM client
+httpx>=0.25.0             # HTTP client for Ollama API
+# (Ollama itself must be installed separately: https://ollama.ai)
+
+# System Control
+pyautogui>=0.9.53
+pynput>=1.7.6
+psutil>=5.9.0
+pywin32>=306; platform_system=="Windows"
+pyobjc>=9.0; platform_system=="Darwin"
+
+# Network & File Transfer
+websockets>=11.0
+zeroconf>=0.47.0
+aiohttp>=3.8.0
+cryptography>=40.0.0
+requests>=2.28.0
+
+# UI Framework
+PyQt5>=5.15.0
+qdarkstyle>=3.1.0
+
+# Utilities
+tqdm>=4.65.0
+colorlog>=6.7.0
+python-dotenv>=1.0.0
+
+# Optional — NLP (not required for Hey V pipeline)
+# spacy>=3.5.0
+# nltk>=3.8.0
+# transformers>=4.28.0
+
+# Development & Testing (optional)
+# pytest>=7.3.0
+# black>=23.3.0
+# flake8>=6.0.0

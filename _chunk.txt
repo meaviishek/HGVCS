@@ -1,0 +1,24 @@
+    def _detect_swipe(self, now: float) -> Optional[str]:
+        """
+        Require both minimum displacement AND minimum velocity.
+        This prevents slow accidental swipes.
+        """
+        recent = [(x, y, t) for x, y, t in self._wrist_hist
+                  if now - t < 0.45]
+        if len(recent) < 6:
+            return None
+
+        dx    = recent[-1][0] - recent[0][0]
+        dy    = recent[-1][1] - recent[0][1]
+        dt    = recent[-1][2] - recent[0][2]
+        if dt < 0.01:
+            return None
+
+        vx = dx / dt   # velocity (normalised coords/sec)
+        vy = dy / dt
+
+        # Require both displacement ≥0.20 AND velocity ≥0.35/s
+        if abs(dx) >= 0.20 and abs(vx) >= 0.35 and abs(dx) > abs(dy) * 1.4:
+            self._wrist_hist.clear()
+            return "swipe_right" if dx > 0 else "swipe_left"
+        if abs(dy) >= 0.20 and abs(vy) >= 0.35 and abs(dy) > ab

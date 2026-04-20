@@ -1,0 +1,718 @@
+# HGVCS - Hand Gesture & Voice Control System
+# Default Configuration File
+
+system:
+  app_name: "HGVCS"
+  version: "1.0.0"
+  debug_mode: false
+  auto_start: false
+  minimize_to_tray: true
+  show_notifications: true
+  theme: "dark"  # dark, light, auto
+  language: "en"
+  
+  # Performance settings
+  performance_mode: "balanced"  # power_saver, balanced, performance
+  max_cpu_usage: 50  # percentage
+  max_memory_usage: 1024  # MB
+
+gesture:
+  enabled: true
+  camera_id: 0
+  resolution:
+    width: 1280
+    height: 720
+  fps: 30
+  
+  # MediaPipe settings
+  detection_confidence: 0.7
+  tracking_confidence: 0.7
+  max_hands: 2
+  model_complexity: 1  # 0, 1, or 2
+  
+  # Model settings
+  model_path: "src/models/gesture_model.h5"
+  tflite_model_path: "src/models/gesture_model.tflite"
+  use_tflite: false
+  sequence_length: 30
+  
+  # Recognition settings
+  confidence_threshold: 0.75
+  cooldown_period: 0.5  # seconds between gestures
+  calibration_required: true
+  
+  # Gesture to action mappings
+  mappings:
+    open_palm:
+      action: "pause"
+      description: "Pause current operation"
+      confidence: 0.85
+    
+    closed_fist:
+      action: "confirm"
+      description: "Confirm/Select action"
+      confidence: 0.80
+    
+    thumbs_up:
+      action: "accept"
+      description: "Accept/Yes/Continue"
+      confidence: 0.85
+    
+    thumbs_down:
+      action: "reject"
+      description: "Reject/No/Cancel"
+      confidence: 0.85
+    
+    pointing:
+      action: "cursor_mode"
+      description: "Enter cursor control mode"
+      confidence: 0.75
+    
+    peace_sign:
+      action: "screenshot"
+      description: "Take screenshot"
+      confidence: 0.80
+    
+    three_fingers:
+      action: "volume_up"
+      description: "Increase volume"
+      confidence: 0.75
+    
+    four_fingers:
+      action: "volume_down"
+      description: "Decrease volume"
+      confidence: 0.75
+    
+    ok_sign:
+      action: "open_settings"
+      description: "Open settings menu"
+      confidence: 0.85
+    
+    rock_on:
+      action: "toggle_media"
+      description: "Toggle play/pause"
+      confidence: 0.80
+    
+    swipe_left:
+      action: "previous_workspace"
+      description: "Switch to previous workspace"
+      confidence: 0.70
+    
+    swipe_right:
+      action: "next_workspace"
+      description: "Switch to next workspace"
+      confidence: 0.70
+    
+    swipe_up:
+      action: "scroll_up"
+      description: "Scroll up"
+      confidence: 0.70
+    
+    swipe_down:
+      action: "scroll_down"
+      description: "Scroll down"
+      confidence: 0.70
+    
+    circular_cw:
+      action: "refresh"
+      description: "Refresh/Reload"
+      confidence: 0.75
+    
+    circular_ccw:
+      action: "undo"
+      description: "Undo last action"
+      confidence: 0.75
+    
+    pinch_in:
+      action: "zoom_out"
+      description: "Zoom out"
+      confidence: 0.80
+    
+    pinch_out:
+      action: "zoom_in"
+      description: "Zoom in"
+      confidence: 0.80
+    
+    l_shape:
+      action: "open_file_manager"
+      description: "Open file manager"
+      confidence: 0.80
+    
+    phone_sign:
+      action: "open_communication"
+      description: "Open communication apps"
+      confidence: 0.80
+    
+    spider_man:
+      action: "open_browser"
+      description: "Open web browser"
+      confidence: 0.80
+    
+    shaka_sign:
+      action: "open_media_player"
+      description: "Open media player"
+      confidence: 0.75
+    
+    cross_fingers:
+      action: "lock_screen"
+      description: "Lock screen"
+      confidence: 0.85
+    
+    gun_sign:
+      action: "screenshot_region"
+      description: "Screenshot of region"
+      confidence: 0.80
+    
+    high_five:
+      action: "wake_system"
+      description: "Wake system/Hello"
+      confidence: 0.85
+    
+    grab_move:
+      action: "select_file"
+      description: "Select file for transfer"
+      confidence: 0.75
+    
+    release:
+      action: "confirm_send"
+      description: "Confirm file send"
+      confidence: 0.80
+    
+    two_hand_pinch:
+      action: "select_multiple"
+      description: "Select multiple files"
+      confidence: 0.75
+    
+    wave_goodbye:
+      action: "cancel"
+      description: "Cancel operation"
+      confidence: 0.70
+    
+    fist_bump:
+      action: "accept_file"
+      description: "Accept incoming file"
+      confidence: 0.80
+
+voice:
+  enabled: true
+  
+  # Whisper settings
+  model_size: "base"  # tiny, base, small, medium, large
+  language: "auto"  # auto or specific language code
+  device: "auto"  # cpu, cuda, auto
+  
+  # Audio settings
+  sample_rate: 16000
+  channels: 1
+  chunk_duration: 2.0  # seconds
+  buffer_duration: 10.0  # seconds of audio to keep
+  
+  # Recognition settings
+  silence_threshold: 0.02
+  voice_activity_timeout: 2.0  # seconds of silence to stop
+  command_timeout: 5.0  # max seconds for command
+  confidence_threshold: 0.7
+  
+  # Wake word settings
+  wake_word: "Hey System"
+  wake_word_enabled: true
+  wake_word_sensitivity: 0.8
+  
+  # Ollama LLM settings
+  ollama_model: "llama3.2:3b"    # USE THE SMALLER MODEL — llama3 (4.7GB) OOMs
+  ollama_url: "http://localhost:11434/api/generate"
+  ollama_timeout: 20             # seconds (reduced for faster response)
+  ollama_use_gpu: false          # set true only if your GPU has >=6GB VRAM free
+  whisper_model: "tiny"          # tiny (multilingual) supports Hindi+English mixed
+  always_awake: true             # V stays awake until you say "sleep" or "goodbye"
+
+  # Text-to-speech
+  tts_enabled: true
+  tts_voice: "default"
+  tts_rate: 150  # words per minute
+  tts_volume: 1.0
+  
+  # Feedback
+  confirmation_beep: true
+  error_beep: true
+  visual_feedback: true
+  
+  # Command patterns
+  commands:
+    open_app:
+      patterns:
+        - "open {app}"
+        - "launch {app}"
+        - "start {app}"
+        - "open application {app}"
+      action: "launch_application"
+      description: "Launch an application"
+    
+    close_window:
+      patterns:
+        - "close window"
+        - "close this"
+        - "close the window"
+        - "exit"
+        - "quit"
+      action: "close_active_window"
+      description: "Close active window"
+    
+    minimize_window:
+      patterns:
+        - "minimize"
+        - "minimize window"
+      action: "minimize_window"
+      description: "Minimize active window"
+    
+    maximize_window:
+      patterns:
+        - "maximize"
+        - "maximize window"
+      action: "maximize_window"
+      description: "Maximize active window"
+    
+    volume_up:
+      patterns:
+        - "volume up"
+        - "increase volume"
+        - "turn up volume"
+        - "louder"
+      action: "volume_up"
+      description: "Increase system volume"
+    
+    volume_down:
+      patterns:
+        - "volume down"
+        - "decrease volume"
+        - "turn down volume"
+        - "quieter"
+      action: "volume_down"
+      description: "Decrease system volume"
+    
+    mute:
+      patterns:
+        - "mute"
+        - "mute audio"
+      action: "mute"
+      description: "Mute system audio"
+    
+    unmute:
+      patterns:
+        - "unmute"
+        - "unmute audio"
+      action: "unmute"
+      description: "Unmute system audio"
+    
+    play_media:
+      patterns:
+        - "play"
+        - "play music"
+        - "resume"
+      action: "play_media"
+      description: "Play media"
+    
+    pause_media:
+      patterns:
+        - "pause"
+        - "pause music"
+        - "stop"
+      action: "pause_media"
+      description: "Pause media"
+    
+    next_track:
+      patterns:
+        - "next"
+        - "next track"
+        - "next song"
+        - "skip"
+      action: "next_track"
+      description: "Next track"
+    
+    previous_track:
+      patterns:
+        - "previous"
+        - "previous track"
+        - "previous song"
+        - "go back"
+      action: "previous_track"
+      description: "Previous track"
+    
+    take_screenshot:
+      patterns:
+        - "take screenshot"
+        - "screenshot"
+        - "capture screen"
+      action: "take_screenshot"
+      description: "Take screenshot"
+    
+    lock_screen:
+      patterns:
+        - "lock screen"
+        - "lock computer"
+        - "lock"
+      action: "lock_screen"
+      description: "Lock screen"
+    
+    shutdown:
+      patterns:
+        - "shut down"
+        - "turn off"
+        - "power off"
+      action: "shutdown"
+      description: "Shut down computer"
+      confirmation_required: true
+    
+    restart:
+      patterns:
+        - "restart"
+        - "reboot"
+      action: "restart"
+      description: "Restart computer"
+      confirmation_required: true
+    
+    sleep:
+      patterns:
+        - "sleep"
+        - "go to sleep"
+      action: "sleep"
+      description: "Put computer to sleep"
+    
+    search:
+      patterns:
+        - "search for {query}"
+        - "find {query}"
+        - "look up {query}"
+      action: "search"
+      description: "Search for something"
+    
+    scroll_up:
+      patterns:
+        - "scroll up"
+        - "move up"
+      action: "scroll_up"
+      description: "Scroll up"
+    
+    scroll_down:
+      patterns:
+        - "scroll down"
+        - "move down"
+      action: "scroll_down"
+      description: "Scroll down"
+    
+    switch_app:
+      patterns:
+        - "switch to {app}"
+        - "go to {app}"
+        - "switch application"
+      action: "switch_application"
+      description: "Switch to application"
+    
+    show_desktop:
+      patterns:
+        - "show desktop"
+        - "minimize all"
+      action: "show_desktop"
+      description: "Show desktop"
+    
+    copy:
+      patterns:
+        - "copy"
+        - "copy this"
+        - "copy selected"
+      action: "copy"
+      description: "Copy selection"
+    
+    paste:
+      patterns:
+        - "paste"
+        - "paste here"
+      action: "paste"
+      description: "Paste from clipboard"
+    
+    delete:
+      patterns:
+        - "delete"
+        - "delete this"
+        - "remove"
+      action: "delete"
+      description: "Delete selection"
+      confirmation_required: true
+    
+    select_all:
+      patterns:
+        - "select all"
+        - "select everything"
+      action: "select_all"
+      description: "Select all"
+    
+    undo:
+      patterns:
+        - "undo"
+        - "go back"
+      action: "undo"
+      description: "Undo last action"
+    
+    redo:
+      patterns:
+        - "redo"
+        - "do again"
+      action: "redo"
+      description: "Redo last action"
+    
+    zoom_in:
+      patterns:
+        - "zoom in"
+        - "magnify"
+      action: "zoom_in"
+      description: "Zoom in"
+    
+    zoom_out:
+      patterns:
+        - "zoom out"
+        - "shrink"
+      action: "zoom_out"
+      description: "Zoom out"
+    
+    create_folder:
+      patterns:
+        - "create folder"
+        - "new folder"
+        - "make folder"
+      action: "create_folder"
+      description: "Create new folder"
+    
+    rename:
+      patterns:
+        - "rename to {name}"
+        - "change name to {name}"
+      action: "rename"
+      description: "Rename selected item"
+    
+    send_file:
+      patterns:
+        - "send to {device}"
+        - "share with {device}"
+        - "send file to {device}"
+      action: "send_file"
+      description: "Send file to device"
+    
+    accept_file:
+      patterns:
+        - "accept file"
+        - "receive file"
+        - "accept"
+      action: "accept_file"
+      description: "Accept incoming file"
+    
+    cancel:
+      patterns:
+        - "cancel"
+        - "stop"
+        - "abort"
+      action: "cancel"
+      description: "Cancel current operation"
+    
+    help:
+      patterns:
+        - "help"
+        - "what can you do"
+        - "show commands"
+      action: "show_help"
+      description: "Show available commands"
+
+network:
+  enabled: true
+  
+  # Service discovery
+  service_name: "HGVCS"
+  service_type: "_hgvcs._tcp.local."
+  discovery_interval: 5  # seconds
+  device_timeout: 30  # seconds
+  
+  # Connection settings
+  protocol: "WebSocket"
+  port: 8080
+  port_range: [8080, 8090]
+  bind_address: "0.0.0.0"
+  
+  # Security
+  encryption: true
+  tls_version: "1.3"
+  require_auth: true
+  certificate_path: "certs/server.crt"
+  key_path: "certs/server.key"
+  ca_path: "certs/ca.crt"
+  
+  # File transfer
+  max_file_size: "10GB"
+  chunk_size: 65536  # 64KB
+  compression: true
+  compression_threshold: "1MB"
+  checksum_algorithm: "SHA-256"
+  resume_support: true
+  
+  # Transfer settings
+  auto_accept_from_trusted: false
+  show_transfer_notifications: true
+  default_download_path: "~/Downloads/HGVCS"
+  
+  # Gestures for file transfer
+  transfer_gestures:
+    select_file: "grab_move"
+    confirm_send: "release"
+    accept_file: "fist_bump"
+    cancel_transfer: "wave_goodbye"
+    select_multiple: "two_hand_pinch"
+
+fusion:
+  # Fusion mode: gesture_only, voice_only, adaptive, both
+  mode: "adaptive"
+  
+  # Priority weights (must sum to 1.0)
+  gesture_priority: 0.6
+  voice_priority: 0.4
+  
+  # Conflict resolution: confidence_based, gesture_priority, voice_priority, context_based
+  conflict_resolution: "confidence_based"
+  
+  # Temporal window for fusion (seconds)
+  fusion_window: 2.0
+  
+  # Cooldown between actions
+  action_cooldown: 0.5
+  
+  # Context awareness
+  context_awareness: true
+  learn_patterns: true
+  pattern_file: "data/user_patterns.json"
+
+ui:
+  # Main window
+  window_title: "HGVCS - Hand Gesture & Voice Control"
+  start_minimized: false
+  show_in_taskbar: true
+  
+  # Visual feedback
+  show_gesture_overlay: true
+  gesture_overlay_opacity: 0.7
+  show_voice_indicator: true
+  show_confidence_scores: true
+  
+  # Notifications
+  desktop_notifications: true
+  notification_duration: 3  # seconds
+  sound_effects: true
+  
+  # Gesture guide
+  show_gesture_guide_on_startup: true
+  gesture_guide_hotkey: "Ctrl+Shift+G"
+  
+  # Colors (hex)
+  colors:
+    primary: "#2196F3"
+    success: "#4CAF50"
+    warning: "#FF9800"
+    error: "#F44336"
+    background: "#1E1E1E"
+    surface: "#2D2D2D"
+    text: "#FFFFFF"
+    text_secondary: "#B0B0B0"
+
+calibration:
+  # User calibration
+  required_on_first_run: true
+  calibration_file: "data/calibration/user_profile.json"
+  
+  # Calibration gestures (user performs each 5 times)
+  calibration_gestures:
+    - "open_palm"
+    - "closed_fist"
+    - "thumbs_up"
+    - "pointing"
+    - "ok_sign"
+  
+  # Voice calibration
+  voice_calibration_phrases:
+    - "Hello system"
+    - "Open application"
+    - "Close window"
+    - "Volume up"
+
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  file: "logs/hgvcs.log"
+  max_size: "10MB"
+  backup_count: 5
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  console_output: true
+
+security:
+  # Device authentication
+  authentication:
+    enabled: true
+    method: "certificate"  # certificate, pairing_code, both
+    pairing_code_length: 6
+    pairing_code_expiry: 300  # seconds
+    certificate_validity: 365  # days
+    auto_trust_on_same_network: false
+  
+  # Access control
+  access_control:
+    default_policy: "ask"  # allow, deny, ask
+    trusted_devices: []  # List of device IDs
+    blocked_devices: []  # List of device IDs
+  
+  # Encryption
+  encryption:
+    enabled: true
+    algorithm: "AES-256-GCM"
+    key_rotation_interval: 86400  # 24 hours
+  
+  # Audit logging
+  audit:
+    enabled: true
+    log_file: "logs/audit.log"
+    log_transfers: true
+    log_authentication: true
+    log_gestures: false
+    log_voice: false
+    retention_days: 30
+
+privacy:
+  # Camera settings
+  camera:
+    indicator_led: true
+    auto_disable_when_idle: true
+    idle_timeout: 300  # seconds
+    disable_on_lock_screen: true
+  
+  # Microphone settings
+  microphone:
+    visual_indicator: true
+    mute_when_not_listening: true
+    wake_word_only_mode: true
+    local_processing_only: true
+  
+  # Data collection
+  data_collection:
+    allow_analytics: false
+    allow_crash_reports: false
+    store_voice_recordings: false
+    store_gesture_data: false
+  
+  # Network
+  network:
+    local_only: true
+    allow_internet: false
+    encrypt_all_transfers: true
+
+shortcuts:
+  # Keyboard shortcuts
+  toggle_gesture: "Ctrl+Shift+H"
+  toggle_voice: "Ctrl+Shift+V"
+  toggle_both: "Ctrl+Shift+B"
+  show_gesture_guide: "Ctrl+Shift+G"
+  open_settings: "Ctrl+Shift+S"
+  emergency_stop: "Escape"
+  pause_resume: "Ctrl+Shift+P"

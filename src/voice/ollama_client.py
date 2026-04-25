@@ -98,6 +98,14 @@ Searching for cats on Google!
 Hey! Kya help chahiye? (What help do you need?)
 """
 
+# Chat/Q&A system prompt — NO JSON action format, pure conversational answers
+CHAT_SYSTEM_PROMPT = """You are V, a helpful AI assistant.
+Answer the user's question directly and conversationally in 2-5 sentences.
+If a KNOWLEDGE BASE section is provided below, use it as your primary source of truth.
+If the knowledge base does not cover the topic, answer from your general training knowledge.
+Do NOT output any JSON. Do NOT mention actions or commands. Just answer naturally.
+"""
+
 
 class OllamaClient:
     """
@@ -107,7 +115,7 @@ class OllamaClient:
 
     def __init__(self, model: str = DEFAULT_MODEL,
                  url: str = OLLAMA_GEN_URL,
-                 timeout: float = 30.0,
+                 timeout: float = 120.0,
                  use_gpu: bool = False):
         self._url     = url
         self._timeout = timeout
@@ -121,14 +129,24 @@ class OllamaClient:
 
     # ── public API ─────────────────────────────────────────
 
-    def ask(self, user_text: str) -> Dict[str, Any]:
+    def ask(self, user_text: str, extra_context: str = "") -> Dict[str, Any]:
         """
-        Send *user_text* to Ollama.
+        Send *user_text* to Ollama using the VOICE COMMAND prompt.
         Returns dict: {"action": str, "params": dict, "reply": str, "raw": str}
+        Use chat_ask() for Q&A / knowledge queries.
         """
         with self._lock:
-            raw = self._request(user_text)
+            raw = self._request(user_text, extra_context)
         return self._parse(raw, user_text)
+
+    def chat_ask(self, user_text: str, knowledge_ctx: str = "") -> str:
+        """
+        Send *user_text* to Ollama using the CHAT / Q&A prompt.
+        knowledge_ctx: pre-built context string from KnowledgeStore.build_context().
+        Returns a plain reply string (no JSON parsing needed).
+        """
+        with self._lock:
+            return self._chat_request(user_text, knowledge_ctx)
 
     def ask_async(self, user_text: str,
                   callback: Callable[[Dict[str, Any]], None]):
@@ -208,23 +226,35 @@ class OllamaClient:
         log.warning(f"No preferred model found → using first available: '{fallback}'")
         return fallback
 
-    def _request(self, user_text: str) -> str:
+    def _request(self, user_text: str, extra_context: str = "") -> str:
+        # Build prompt: system + optional knowledge context + user message
+        if extra_context:
+            prompt = f"{SYSTEM_PROMPT}\n\n{extra_context}\nUser: {user_text}"
+        else:
+            prompt = f"{SYSTEM_PROMPT}\n\nUser: {user_text}"
         payload = {
             "model":  self._model,
-            "prompt": f"{SYSTEM_PROMPT}\n\nUser: {user_text}",
+            "prompt": prompt,
             "stream": False,
             "options": {
                 "temperature": 0.2,
-                "num_predict": 60,           # REDUCED: 60 tokens → faster response
-                "num_gpu":     self._num_gpu, # 0 = CPU only, -1 = auto
-                "num_thread":  6,            # Use more CPU threads
-                "top_k":       10,           # Greedy-ish for faster decoding
+                "num_predict": 100,          # keep short for faster CPU inference
+                "num_gpu":     self._num_gpu,
+                "num_thread":  6,
+                "top_k":       10,
                 "top_p":       0.9,
             }
         }
         try:
             if _HTTPX_OK:
-                with httpx.Client(timeout=self._timeout) as client:
+                # Use split timeout: fast connect (5 s), long read for CPU inference
+                _timeout = httpx.Timeout(
+                    connect=5.0,
+                    read=self._timeout,
+                    write=10.0,
+                    pool=5.0,
+                )
+                with httpx.Client(timeout=_timeout) as client:
                     resp = client.post(self._url, json=payload)
                     resp.raise_for_status()
                     data = resp.json()
@@ -245,6 +275,71 @@ class OllamaClient:
                 log.error(f"Ollama server not running at {OLLAMA_BASE} — start with: ollama serve")
             else:
                 log.error(f"Ollama request failed: {e}")
+            return ""
+
+    def _chat_request(self, user_text: str, knowledge_ctx: str = "") -> str:
+        """
+        Chat/Q&A request using CHAT_SYSTEM_PROMPT.
+        knowledge_ctx is injected between the system prompt and the question
+        so the model treats it as authoritative context.
+        Returns raw text reply (no JSON parsing).
+        """
+        if knowledge_ctx:
+            prompt = (
+                f"{CHAT_SYSTEM_PROMPT}\n"
+                f"KNOWLEDGE BASE:\n{knowledge_ctx}\n"
+                f"END OF KNOWLEDGE BASE\n\n"
+                f"User: {user_text}\nV:"
+            )
+        else:
+            prompt = f"{CHAT_SYSTEM_PROMPT}\n\nUser: {user_text}\nV:"
+
+        payload = {
+            "model":  self._model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.7,          # more natural for Q&A
+                "num_predict": 300,          # allow longer knowledge answers
+                "num_gpu":     self._num_gpu,
+                "num_thread":  6,
+                "top_k":       40,
+                "top_p":       0.9,
+            }
+        }
+        try:
+            if _HTTPX_OK:
+                _timeout = httpx.Timeout(
+                    connect=5.0,
+                    read=self._timeout,
+                    write=10.0,
+                    pool=5.0,
+                )
+                with httpx.Client(timeout=_timeout) as client:
+                    resp = client.post(self._url, json=payload)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    return data.get("response", "").strip()
+            else:
+                return self._urllib_chat_request(payload)
+        except Exception as e:
+            log.error(f"Ollama chat request failed: {e}")
+            return ""
+
+    def _urllib_chat_request(self, payload: dict) -> str:
+        import urllib.request
+        data = json.dumps(payload).encode("utf-8")
+        req  = urllib.request.Request(
+            self._url, data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                body = resp.read().decode("utf-8")
+                return json.loads(body).get("response", "").strip()
+        except Exception as e:
+            log.error(f"urllib Ollama chat request failed: {e}")
             return ""
 
     def _try_fallback(self):

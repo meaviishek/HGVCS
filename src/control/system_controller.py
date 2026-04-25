@@ -180,53 +180,60 @@ class SystemController:
         log.info(f"Gesture action: {gesture} (conf={confidence:.2f})")
         return True
 
-    def execute_two_hand(self, left_gesture: str, right_gesture: str = "") -> bool:
+    def execute_two_hand(self, left_gesture: str, right_gesture: str = "",
+                         zoom_steps: int = 1) -> bool:
         """
         Handle combined two-hand gestures.
         Called from HandEngine when both hands are detected.
         If right_gesture is empty, left_gesture contains a pre-computed combo name.
+        zoom_steps: number of Ctrl+=/- presses to fire for zoom (proportional)
         """
         if not right_gesture:
             combo = left_gesture
         else:
             combo = f"{left_gesture}+{right_gesture}"
-        
-        log.info(f"Two-hand combo: {combo}")
+
+        log.info(f"Two-hand combo: {combo}  steps={zoom_steps}")
         now = time.time()
         if now - self._last_action_t < self._cooldown:
             return False
         self._last_action_t = now
 
-        # two-hand combo table
+        # ── zoom helpers ──────────────────────────────────────────────────
+        def _zoom_in():
+            for _ in range(zoom_steps):
+                pyautogui.hotkey("ctrl", "=")
+                time.sleep(0.04)
+
+        def _zoom_out():
+            for _ in range(zoom_steps):
+                pyautogui.hotkey("ctrl", "-")
+                time.sleep(0.04)
+
+        # ── two-hand combo table ───────────────────────────────────────────
         combos = {
-            # both_hands_spread (both open palms) → show desktop
-            "open_palm+open_palm":       lambda: pyautogui.hotkey("win", "d"),
-            # left fist + right thumbs up → confirm and send
+            # NOTE: open_palm+open_palm (show desktop) removed — too easy
+            # to trigger accidentally when waving or pausing.
+
+            # left fist + right thumbs up → save (Ctrl+S)
             "closed_fist+thumbs_up":     lambda: pyautogui.hotkey("ctrl", "s"),
-            # both pointing → zoom to fit / reset zoom
+            # both pointing → reset zoom (Ctrl+0)
             "pointing+pointing":         lambda: pyautogui.hotkey("ctrl", "0"),
-            # left swipe + right pointing → switch + click
+            # thumbs up + thumbs down → lock screen (Win+L)
             "thumbs_up+thumbs_down":     lambda: pyautogui.hotkey("win", "l"),
-            # rock on both → toggle dark mode (Win+period opens emoji / toggle)
+            # rock on both → emoji picker (Win+.)
             "rock_on+rock_on":           lambda: pyautogui.hotkey("win", "."),
-            # left peace + right peace → multi-screenshot (Win+Shift+S)
+            # both peace/V-sign → screenshot region (Win+Shift+S)
             "peace_sign+peace_sign":     lambda: pyautogui.hotkey("win", "shift", "s"),
-            # left open palm + right pointing → copy (Ctrl+C)
+            # open palm + pointing → copy (Ctrl+C)
             "open_palm+pointing":        lambda: pyautogui.hotkey("ctrl", "c"),
-            # left fist + right pointing → paste (Ctrl+V)
+            # fist + pointing → paste (Ctrl+V)
             "closed_fist+pointing":      lambda: pyautogui.hotkey("ctrl", "v"),
-            # two hands point → reset zoom
-            "pointing+pointing":         lambda: pyautogui.hotkey("ctrl", "0"),
-            "thumbs_up+thumbs_down":     lambda: pyautogui.hotkey("win", "l"),
-            "rock_on+rock_on":           lambda: pyautogui.hotkey("win", "."),
-            "peace_sign+peace_sign":     lambda: pyautogui.hotkey("win", "shift", "s"),
-            "open_palm+pointing":        lambda: pyautogui.hotkey("ctrl", "c"),
-            "closed_fist+pointing":      lambda: pyautogui.hotkey("ctrl", "v"),
+            # thumbs up + peace sign → Alt+Tab (app switch)
             "thumbs_up+peace_sign":      lambda: pyautogui.hotkey("alt", "tab"),
-            "wave+wave":                 lambda: None,
-            # ── semantic two-hand gestures ──────────────────────────
-            "two_hand_zoom_in":          lambda: pyautogui.hotkey("ctrl", "="),
-            "two_hand_zoom_out":         lambda: pyautogui.hotkey("ctrl", "-"),
+            # ── semantic two-hand zoom (proportional) ──────────────────────
+            "two_hand_zoom_in":          _zoom_in,
+            "two_hand_zoom_out":         _zoom_out,
             # Cross (X) gesture — toggles minimize ↔ maximize
             "two_hand_cross":            self._do_cross,
         }
@@ -296,12 +303,20 @@ class SystemController:
         pyautogui.press("right")
 
     def _swipe_up(self):
-        """Scroll up — 3 wheel clicks up."""
-        pyautogui.scroll(8)
+        """Scroll up — moves mouse to screen center then scrolls up."""
+        import pyautogui as _pag
+        sw, sh = _pag.size()
+        # Move to center of screen so scroll targets the active document/browser
+        _pag.moveTo(sw // 2, sh // 2, duration=0.05)
+        _pag.scroll(5)   # 5 wheel clicks up
 
     def _swipe_down(self):
-        """Scroll down — 3 wheel clicks down."""
-        pyautogui.scroll(-8)
+        """Scroll down — moves mouse to screen center then scrolls down."""
+        import pyautogui as _pag
+        sw, sh = _pag.size()
+        _pag.moveTo(sw // 2, sh // 2, duration=0.05)
+        _pag.scroll(-5)  # 5 wheel clicks down
+
 
     def _refresh(self):
         """Circular CW → Ctrl+R."""
@@ -345,18 +360,18 @@ class SystemController:
 
     def _do_cross(self):
         """
-        Two-hand X (cross) → toggle minimize ↔ maximize.
+        Two-hand X (cross) -> toggle minimize <-> maximize.
         First cross: minimize current window (Win+Down).
         Second cross: maximize it back   (Win+Up).
         """
         if not self._cross_minimized:
             pyautogui.hotkey("win", "down")   # minimize
             self._cross_minimized = True
-            log.info("Cross gesture → Minimize")
+            log.info("Cross gesture -> Minimize")
         else:
             pyautogui.hotkey("win", "up")     # maximize / restore
             self._cross_minimized = False
-            log.info("Cross gesture → Maximize / Restore")
+            log.info("Cross gesture -> Maximize / Restore")
 
     # ── dispatch table ────────────────────────────────────
     # NOTE: peace_sign removed — it is exclusively the scroll trigger shape

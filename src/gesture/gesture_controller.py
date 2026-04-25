@@ -59,7 +59,7 @@ class GestureController:
         self._cooldown:  float = float(config.get("gesture_cooldown", 0.5))
         # Two-hand combo cooldown (separate, longer)
         self._last_two_hand_t: float = 0.0
-        self._two_hand_cd: float = 1.0
+        self._two_hand_cd: float = 0.45  # lowered: 1.0→0.45s for responsive zoom
         log.info("GestureController initialised")
 
     # -- dependency injection --
@@ -92,11 +92,13 @@ class GestureController:
 
     # -- main entry point --
     def on_gesture(self, gesture_name: str, confidence: float,
-                   two_hand_gesture: str = "", confirmed: bool = True):
+                   two_hand_gesture: str = "", confirmed: bool = True,
+                   zoom_steps: int = 1):
         """
         Call this whenever HandEngine produces a gesture.
         confirmed = True means the hold-guard has passed.
         Accepts both single-hand and two-hand gesture names.
+        zoom_steps: how many Ctrl+=/- presses to fire for zoom (1-3).
         """
         if not self._enabled:
             return
@@ -116,14 +118,19 @@ class GestureController:
                         left_g, right_g = parts[0], parts[1]
                     else:
                         left_g, right_g = two_hand_gesture, ""  # semantic combos like zoom
-                    fired = self._sys_ctrl.execute_two_hand(left_g, right_g)
+                    fired = self._sys_ctrl.execute_two_hand(left_g, right_g,
+                                                            zoom_steps=zoom_steps)
                     if fired:
                         self._last_two_hand_t = now
-                        log.info(f"Two-hand combo: {two_hand_gesture}")
+                        log.info(f"Two-hand combo: {two_hand_gesture}  steps={zoom_steps}")
                         self._publish("two_hand_gesture", {
-                            "combo": two_hand_gesture, "timestamp": now
+                            "combo": two_hand_gesture,
+                            "zoom_steps": zoom_steps,
+                            "timestamp": now
                         })
-                        return  # don't also fire single-hand action
+            # ALWAYS return when two-hand mode is active — never fall through
+            # to single-hand actions (prevents volume/swipe during zoom)
+            return
 
         # -- single-hand gesture --
         if gesture_name in ("none", "unknown", "pointing", "pinch", ""):

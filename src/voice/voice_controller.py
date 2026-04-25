@@ -63,9 +63,9 @@ class VoiceController:
         "next_track":      "__next_track__",
         "prev_track":      "__prev_track__",
         # Navigation
-        "screenshot":      "peace_sign",
-        "scroll_up":       "swipe_up",
-        "scroll_down":     "swipe_down",
+        "screenshot":      "ok_sign",
+        "scroll_up":       "__scroll_up__",
+        "scroll_down":     "__scroll_down__",
         "zoom_in":         "pinch_out",
         "zoom_out":        "pinch_in",
         "swipe_left":      "swipe_left",
@@ -93,8 +93,8 @@ class VoiceController:
         "lock_screen":     "__lock__",
         "type_text":       "__type__",
         # Presentation
-        "ppt_next":        "__ppt_next__",
-        "ppt_prev":        "__ppt_prev__",
+        "ppt_next":        "__ppt_pgdn__",
+        "ppt_prev":        "__ppt_pgup__",
         "ppt_start":       "__ppt_start__",
         "ppt_end":         "__ppt_end__",
         "ppt_fullscreen":  "__ppt_full__",
@@ -137,6 +137,7 @@ class VoiceController:
         self.event_bus = event_bus
         self._enabled  = False
         self._sys_ctrl = None
+        self._knowledge: object = None   # KnowledgeStore (injected)
 
         # Voice subsystems
         self._wake   = None
@@ -155,6 +156,9 @@ class VoiceController:
     # ── dependency injection ───────────────────────────────
     def set_system_controller(self, ctrl):
         self._sys_ctrl = ctrl
+
+    def set_knowledge_store(self, ks):
+        self._knowledge = ks
 
     def set_state_callback(self, cb):
         self._on_state_change = cb
@@ -243,17 +247,17 @@ class VoiceController:
         self._pub_state("recording")
 
         def _process():
-            action, reply = self._resolve(text)
+            action, params, reply = self._resolve(text)
 
-            log.info(f"Action={action!r}  Reply={reply!r}")
+            log.info(f"Action={action!r}  Params={params}  Reply={reply!r}")
 
             # Store for feedback context
             self._last_text  = text
             self._last_reply = reply
 
-            # Execute OS action
+            # Execute OS action (with params so search query is passed)
             if action and action != "none":
-                self._execute_action(action, {})
+                self._execute_action(action, params)
 
             # Speak reply
             if reply:
@@ -286,25 +290,228 @@ class VoiceController:
         # ── 1. Feedback correction detection ──────────────
         feedback_reply = self._handle_feedback(text_lower)
         if feedback_reply:
-            return "none", feedback_reply
+            return "none", {}, feedback_reply
 
         # ── 2. Learned overrides ──────────────────────────
         for pattern, (saved_action, saved_reply) in self._learned.items():
             if pattern in text_lower:
                 log.info(f"Learned override for '{pattern}': action={saved_action}")
-                return saved_action, saved_reply
+                return saved_action, {}, saved_reply
 
-        # ── 3. Direct fast-path ───────────────────────────
+        # ── 3. Direct fast-path for greetings ───────────────
         for phrase, reply in self._DIRECT_REPLIES.items():
             if phrase in text_lower or text_lower == phrase:
-                return "none", reply
+                return "none", {}, reply
 
-        # ── 4. LLM ───────────────────────────────────────
+        # ── 3b. Rule-based action fast-path (NO LLM needed) ─
+        #  Handles: search, screenshot, scroll, ppt, volume, browser
+        #  These are 100% reliable and instant — LLM not needed.
+        fast = self._rule_based(text_lower, text)
+        if fast is not None:
+            return fast
+
+        # ── 4. LLM ───────────────────────────────────────────
         if not self._ollama:
-            return "none", "I'm sorry, my language model isn't available right now."
+            return "none", {}, "I'm sorry, my language model isn't available right now."
 
-        result = self._ollama.ask(text)
-        return result.get("action", "none"), result.get("reply", "")
+        extra_context = ""
+        if self._knowledge:
+            try:
+                extra_context = self._knowledge.build_context(text, top_k=3)
+            except Exception:
+                pass
+        result = self._ollama.ask(text, extra_context=extra_context)
+        return (
+            result.get("action", "none"),
+            result.get("params", {}),
+            result.get("reply", ""),
+        )
+
+    def _rule_based(self, tl: str, orig: str):
+        """
+        Pure rule matching — returns (action, params, reply) or None if no match.
+        Handles: search, screenshot, scroll, volume, browser, PPT, window controls.
+        tl = text.lower().strip()   orig = original cased text
+        """
+        import re
+
+        # ── SEARCH ───────────────────────────────────────────
+        # General:  "search for X" / "look up X" / "find X online"
+        # Site-specific: "search X on YouTube" / "YouTube pe search karo X"
+        search_patterns = [
+            # Site-specific — must come FIRST so YouTube/Bing/etc. take priority
+            (r"(?:search|find)\s+(.+?)\s+on\s+(youtube|yt|google|bing|duckduckgo|ddg)$", 1, 2),
+            (r"(youtube|yt|google|bing)\s+(?:pe\s+)?(?:search\s+(?:karo\s+)?)?(.+)",     2, 1),
+            (r"(youtube|yt)\s+par\s+(?:search\s+(?:karo\s+)?)?(.+)",                     2, 1),
+            # General search
+            (r"search(?:\s+for)?\s+(.+?)(?:\s+on\s+google)?$", 1, None),
+            (r"(?:look\s+up|find\s+online|search\s+online)\s+(.+)",  1, None),
+            (r"(?:dhundo|dhundho|khojo)\s+(.+)",                     1, None),
+        ]
+        for entry in search_patterns:
+            pat, q_grp, site_grp = entry
+            m = re.search(pat, tl, re.IGNORECASE)
+            if m:
+                query = m.group(q_grp).strip().strip(".,!?")
+                site  = m.group(site_grp).strip().lower() if site_grp else None
+                if query and len(query) > 1:
+                    log.info(f"Rule-based search: query={query!r} site={site!r}")
+                    params = {"query": query}
+                    if site in ("youtube", "yt"):
+                        params["site"] = "youtube"
+                        return ("search_web", params, f"Searching YouTube for '{query}'!")
+                    if site == "bing":
+                        params["site"] = "bing"
+                        return ("search_web", params, f"Searching Bing for '{query}'!")
+                    return ("search_web", params, f"Searching for '{query}'!")
+
+        # ── SCREENSHOT ───────────────────────────────────────
+        shot_kws = [
+            "screenshot", "screen shot", "take a screenshot", "capture screen",
+            "take screenshot", "screenshot lo", "screenshot lelo", "screen capture",
+            "snap screen", "screen snap",
+        ]
+        if any(kw in tl for kw in shot_kws):
+            return ("screenshot", {}, "Taking a screenshot!")
+
+        # ── SCROLL ───────────────────────────────────────────
+        up_kws = [
+            "scroll up", "upar scroll", "scroll upar", "upar jao",
+            "page up", "move up", "go up", "scroll kar upar",
+            "scroll karo upar", "neeche se upar",
+        ]
+        down_kws = [
+            "scroll down", "neeche scroll", "scroll neeche", "neeche jao",
+            "page down", "move down", "go down", "scroll kar neeche",
+            "scroll karo neeche", "upar se neeche",
+        ]
+        if any(kw in tl for kw in up_kws):
+            return ("scroll_up", {}, "Scrolling up!")
+        if any(kw in tl for kw in down_kws):
+            return ("scroll_down", {}, "Scrolling down!")
+
+        # ── PPT / PRESENTATION ──────────────────────────────
+        next_kws = [
+            "next slide", "agli slide", "next page", "slide aage", "aage slide",
+            "forward slide", "next presentation", "next ppt", "slide badho",
+            "go next", "slide next", "advance slide",
+        ]
+        prev_kws = [
+            "previous slide", "pichli slide", "prev slide", "slide peeche",
+            "peeche slide", "back slide", "last slide", "go back slide",
+            "slide previous", "slide back",
+        ]
+        start_kws = ["start presentation", "presentation start", "start slideshow",
+                     "slideshow start", "f5", "begin presentation"]
+        end_kws   = ["end presentation", "stop presentation", "exit slideshow",
+                     "close presentation", "end slideshow"]
+        if any(kw in tl for kw in next_kws):
+            return ("ppt_next", {}, "Next slide!")
+        if any(kw in tl for kw in prev_kws):
+            return ("ppt_prev", {}, "Previous slide!")
+        if any(kw in tl for kw in start_kws):
+            return ("ppt_start", {}, "Starting presentation!")
+        if any(kw in tl for kw in end_kws):
+            return ("ppt_end", {}, "Ending presentation.")
+
+        # ── VOLUME ───────────────────────────────────────────
+        vol_up_kws = [
+            "volume up", "volume badhao", "louder", "increase volume",
+            "turn up", "awaz badhao", "awaz tez karo", "sound up",
+        ]
+        vol_dn_kws = [
+            "volume down", "volume kam karo", "quieter", "decrease volume",
+            "turn down", "awaz kam karo", "awaz kam", "sound down",
+        ]
+        mute_kws = ["mute", "silence", "chup", "band karo awaz", "mute karo"]
+        if any(kw in tl for kw in vol_up_kws):
+            return ("volume_up", {}, "Volume up!")
+        if any(kw in tl for kw in vol_dn_kws):
+            return ("volume_down", {}, "Volume down!")
+        if any(kw in tl for kw in mute_kws):
+            return ("mute", {}, "Muted!")
+
+        # ── BROWSER ──────────────────────────────────────────
+        browser_kws = [
+            "open browser", "browser kholo", "browser open", "open chrome",
+            "open google", "launch browser", "internet kholo", "kholo browser",
+        ]
+        if any(kw in tl for kw in browser_kws):
+            return ("open_browser", {}, "Opening browser!")
+
+        # ── WINDOW MANAGEMENT ────────────────────────────────
+        if any(kw in tl for kw in ["close window", "window band", "band karo", "close this"]):
+            return ("close_window", {}, "Closing window!")
+        if any(kw in tl for kw in ["minimize", "chota karo", "minimize window"]):
+            return ("minimize_window", {}, "Minimizing!")
+        if any(kw in tl for kw in ["maximize", "fullscreen", "bada karo", "full screen"]):
+            return ("maximize_window", {}, "Maximizing!")
+        if any(kw in tl for kw in ["switch app", "switch task", "alt tab", "task switch",
+                                    "app badlo", "dusra app"]):
+            return ("task_switch", {}, "Switching app!")
+
+        # ── OPEN SPECIFIC APPS / WEBSITES ────────────────────
+        # Map of trigger keywords → (url, friendly name)
+        # Also handles common misrecognitions from STT
+        _SITE_MAP = [
+            # YouTube — common misrecognitions: "you do", "your door", "you tube", "utube"
+            (["youtube", "you tube", "you do", "utube", "you tub", "your tube",
+              "your door", "open you", "yutube", "u tube"],
+             "https://www.youtube.com", "YouTube"),
+            # WhatsApp
+            (["whatsapp", "whats app", "what's app", "watsapp", "wattsapp"],
+             "https://web.whatsapp.com", "WhatsApp"),
+            # Instagram
+            (["instagram", "insta", "instagrm", "instgram"],
+             "https://www.instagram.com", "Instagram"),
+            # Facebook
+            (["facebook", "face book", "fb"],
+             "https://www.facebook.com", "Facebook"),
+            # Twitter / X
+            (["twitter", "x.com", "tweet"],
+             "https://www.twitter.com", "Twitter"),
+            # Gmail
+            (["gmail", "mail", "google mail", "jee mail"],
+             "https://mail.google.com", "Gmail"),
+            # Google Drive
+            (["google drive", "gdrive", "drive"],
+             "https://drive.google.com", "Google Drive"),
+            # Google Maps
+            (["google maps", "maps", "google map"],
+             "https://maps.google.com", "Google Maps"),
+            # Netflix
+            (["netflix", "net flix", "netfix"],
+             "https://www.netflix.com", "Netflix"),
+            # ChatGPT
+            (["chatgpt", "chat gpt", "gpt", "openai", "chat g p t"],
+             "https://chat.openai.com", "ChatGPT"),
+            # GitHub
+            (["github", "git hub"],
+             "https://www.github.com", "GitHub"),
+            # LinkedIn
+            (["linkedin", "linked in"],
+             "https://www.linkedin.com", "LinkedIn"),
+            # Amazon
+            (["amazon", "amzon"],
+             "https://www.amazon.in", "Amazon"),
+            # Flipkart
+            (["flipkart", "flip kart"],
+             "https://www.flipkart.com", "Flipkart"),
+        ]
+
+        # Check if the command contains "open" + any site trigger
+        has_open = any(w in tl for w in ["open", "kholo", "launch", "start", "go to", "jao"])
+        for triggers, url, name in _SITE_MAP:
+            if any(t in tl for t in triggers):
+                # Must either say "open X" or just name the site without open
+                if has_open or any(t == tl.strip() for t in triggers):
+                    import webbrowser
+                    webbrowser.open(url)
+                    return ("none", {}, f"Opening {name}!")
+
+        return None   # fall through to LLM
+
+
 
     def _handle_feedback(self, text_lower: str) -> str | None:
         """
@@ -355,27 +562,106 @@ class VoiceController:
 
     # ── action execution ───────────────────────────────────
 
+    @staticmethod
+    def _detect_browser_context() -> str:
+        """
+        Returns the active site context by reading the foreground window title.
+        Possible return values: 'youtube', 'google', 'bing', 'duckduckgo',
+        'instagram', 'twitter', 'facebook', 'github', 'netflix', 'amazon', 'other'.
+        Falls back to 'other' on any error.
+        """
+        try:
+            import win32gui
+            hwnd  = win32gui.GetForegroundWindow()
+            title = win32gui.GetWindowText(hwnd).lower()
+            if "youtube" in title:
+                return "youtube"
+            if "bing" in title:
+                return "bing"
+            if "duckduckgo" in title or "duck duck" in title:
+                return "duckduckgo"
+            if "instagram" in title:
+                return "instagram"
+            if "twitter" in title or "x.com" in title:
+                return "twitter"
+            if "facebook" in title:
+                return "facebook"
+            if "github" in title:
+                return "github"
+            if "netflix" in title:
+                return "netflix"
+            if "amazon" in title:
+                return "amazon"
+            if "google" in title:
+                return "google"
+        except Exception:
+            pass
+        return "other"
+
     def _execute_action(self, action: str, params: dict):
-        import pyautogui, subprocess, webbrowser, urllib.parse
+        import pyautogui, subprocess, webbrowser, urllib.parse, time as _time
 
         gesture_name = self._ACTION_MAP.get(action)
         if gesture_name is None:
             return
 
         def _open_browser():
-            """Open default browser (works without Ctrl+Alt+B which may not exist)."""
+            """Open default browser."""
             try:
                 webbrowser.open("https://www.google.com")
             except Exception:
                 pyautogui.hotkey("win", "r")
-                import time; time.sleep(0.3)
+                _time.sleep(0.3)
                 pyautogui.typewrite("chrome", interval=0.05)
                 pyautogui.press("enter")
 
         def _search_web():
+            """
+            Context-aware search:
+            - If caller explicitly requested a site (params['site']), use that.
+            - Otherwise detect which site is already open in the active window.
+            - Opens a new tab in the existing browser and navigates to the
+              correct search URL for the detected / requested site.
+            """
             query = params.get("query", "")
-            if query:
-                url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
+            if not query:
+                return
+
+            # 1. Explicit site override from rule-based matcher
+            requested_site = params.get("site", "").lower()
+
+            # 2. Auto-detect if no explicit site
+            if not requested_site:
+                requested_site = self._detect_browser_context()
+
+            # 3. Build search URL based on site context
+            q = urllib.parse.quote_plus(query)
+            _SEARCH_URLS = {
+                "youtube":    f"https://www.youtube.com/results?search_query={q}",
+                "bing":       f"https://www.bing.com/search?q={q}",
+                "duckduckgo": f"https://duckduckgo.com/?q={q}",
+                "google":     f"https://www.google.com/search?q={q}",
+            }
+            url = _SEARCH_URLS.get(requested_site,
+                                    f"https://www.google.com/search?q={q}")
+
+            log.info(f"Context-aware search → site={requested_site!r} url={url!r}")
+
+            # 4. Open new tab in existing browser window, then navigate
+            try:
+                # Ctrl+T opens a new tab in Chrome/Firefox/Edge/Brave
+                pyautogui.hotkey("ctrl", "t")
+                _time.sleep(0.4)          # wait for new tab to open
+                # Focus the address bar
+                pyautogui.hotkey("ctrl", "l")
+                _time.sleep(0.15)
+                # Type the URL and press Enter
+                pyautogui.hotkey("ctrl", "a")  # clear any existing text
+                _time.sleep(0.05)
+                pyautogui.typewrite(url, interval=0.03)
+                pyautogui.press("enter")
+            except Exception as e:
+                log.warning(f"Browser tab navigation failed ({e}), falling back to webbrowser.open")
                 try:
                     webbrowser.open(url)
                 except Exception:
@@ -418,6 +704,16 @@ class VoiceController:
             "__ppt_start__":   lambda: pyautogui.press("f5"),
             "__ppt_end__":     lambda: (pyautogui.press("escape"), pyautogui.hotkey("ctrl", "end")),
             "__ppt_full__":    lambda: pyautogui.press("f5"),
+            # Scroll (direct, bypasses system_controller to avoid misrouting)
+            "__scroll_up__":   lambda: (
+                lambda s=pyautogui.size(): pyautogui.moveTo(s[0]//2, s[1]//2, duration=0.05) or pyautogui.scroll(5)
+            )(),
+            "__scroll_down__": lambda: (
+                lambda s=pyautogui.size(): pyautogui.moveTo(s[0]//2, s[1]//2, duration=0.05) or pyautogui.scroll(-5)
+            )(),
+            # PPT via Page Up/Down (more universal than arrow keys)
+            "__ppt_pgup__":    lambda: pyautogui.press("pageup"),
+            "__ppt_pgdn__":    lambda: pyautogui.press("pagedown"),
         }
 
         sp = special.get(gesture_name)

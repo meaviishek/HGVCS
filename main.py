@@ -19,8 +19,32 @@ import signal
 import logging
 from pathlib import Path
 
+# ── Suppress TensorFlow / oneDNN diagnostic spam BEFORE any imports ────────
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")   # suppress TF C++ logs
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")  # silence oneDNN notices
+os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+
+# ── Pre-load torch early so its DLLs win the race against TF probing ───────
+# mediapipe's internal TF probe can corrupt DLL-load state; loading torch first prevents this
+try:
+    import torch as _torch_preload
+    del _torch_preload
+except Exception:
+    pass   # handled later gracefully
+
+# Qt import at top level so signal_handler can use QApplication
+try:
+    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtCore import Qt, QTimer
+    from PyQt5.QtGui import QIcon
+    _QT_OK = True
+except ImportError:
+    _QT_OK = False
+    QApplication = None
+
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
+
 
 # Check Python version
 if sys.version_info < (3, 8):
@@ -78,24 +102,37 @@ def setup_logging(config):
 
 def check_dependencies():
     """Check if required dependencies are installed."""
-    required_packages = [
-        'cv2', 'numpy', 'mediapipe', 'tensorflow', 'whisper',
-        'pyautogui', 'PyQt5', 'yaml', 'websockets', 'zeroconf'
+    # Hard-required: app absolutely cannot run without these
+    hard_required = ['cv2', 'numpy', 'pyautogui', 'PyQt5', 'yaml']
+    # Soft-required: handled gracefully inside subsystems if missing/broken
+    soft_required = [
+        ('mediapipe',  'Hand tracking disabled'),
+        ('whisper',    'Voice wake-word disabled (try: pip install faster-whisper)'),
+        ('websockets', 'Network P2P disabled'),
+        ('zeroconf',   'mDNS discovery disabled'),
     ]
     
-    missing = []
-    for package in required_packages:
+    missing_hard = []
+    for package in hard_required:
         try:
             __import__(package)
-        except ImportError:
-            missing.append(package)
+        except Exception:
+            missing_hard.append(package)
     
-    if missing:
-        print("Error: Missing required packages:")
-        for pkg in missing:
+    if missing_hard:
+        print("Error: Missing critical packages:")
+        for pkg in missing_hard:
             print(f"  - {pkg}")
-        print("\nPlease install dependencies: pip install -r requirements.txt")
+        print("\nPlease install: pip install -r requirements.txt")
         return False
+    
+    # Soft checks — warn only, don't abort
+    for package, msg in soft_required:
+        try:
+            __import__(package)
+        except Exception as e:
+            print(f"[Warning] {package} unavailable: {msg}")
+            print(f"          ({type(e).__name__}: {str(e)[:80]})")
     
     return True
 
@@ -105,7 +142,8 @@ def signal_handler(signum, frame):
     logger.info(f"Received signal {signum}, shutting down...")
     
     # Cleanup will be handled by the application
-    QApplication.quit()
+    if QApplication:
+        QApplication.quit()
 
 def main():
     """Main application entry point."""
@@ -196,10 +234,10 @@ Examples:
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Import Qt and start application
-    from PyQt5.QtWidgets import QApplication
-    from PyQt5.QtCore import Qt
-    from PyQt5.QtGui import QIcon
+    # Import Qt
+    if not _QT_OK:
+        print("Error: PyQt5 not installed. Run: pip install PyQt5")
+        sys.exit(1)
     
     # Enable high DPI scaling
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
@@ -211,8 +249,11 @@ Examples:
     
     # Set application style
     if config['ui'].get('theme') == 'dark':
-        import qdarkstyle
-        app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
+        try:
+            import qdarkstyle
+            app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
+        except ImportError:
+            pass  # qdarkstyle not installed, use built-in theme
     
     gesture_controller = None
     voice_controller   = None
@@ -317,16 +358,39 @@ Examples:
             
             window.show()
             
-            # Start controllers
+            # Start controllers AFTER window is shown
             if gesture_controller:
                 gesture_controller.start()
             if voice_controller:
                 voice_controller.start()
             if network_manager:
                 network_manager.start()
-            
+
+            # Re-wire ChatTab after voice_controller.start() so _ollama + TTS are ready
+            def _rewire_chat():
+                try:
+                    if hasattr(window, '_chat_tab'):
+                        ct = window._chat_tab
+                        if voice_controller:
+                            # Wire Ollama
+                            if voice_controller._ollama:
+                                ct.set_ollama_client(voice_controller._ollama)
+                                model = getattr(voice_controller._ollama, '_model', '')
+                                if model:
+                                    ct.update_model_label(model)
+                                    logger.info(f"ChatTab wired to Ollama model: {model}")
+                            # Wire TTS so Listen + Auto-Speak work
+                            tts = getattr(voice_controller, '_tts', None)
+                            if tts:
+                                ct.set_tts_engine(tts)
+                                logger.info("ChatTab TTS engine wired")
+                except Exception as _e:
+                    logger.warning(f"ChatTab re-wire failed: {_e}")
+
+            QTimer.singleShot(1500, _rewire_chat)   # 1.5 s after start()
+
             logger.info("Application started successfully!")
-            
+
             # Run application
             sys.exit(app.exec_())
     

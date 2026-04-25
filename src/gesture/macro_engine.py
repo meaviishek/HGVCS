@@ -49,7 +49,8 @@ _DEFAULT_MACROS: List[Dict] = [
         "name": "double_peace",
         "sequence": ["peace_sign", "peace_sign"],
         "max_gap": 0.9,
-        "description": "Double peace → Toggle dark mode / Ctrl+Shift+J",
+        "description": "DISABLED — peace_sign is exclusively the scroll gesture",
+        "disabled": True,
     },
 
     # 3-gesture sequences
@@ -175,7 +176,7 @@ def _open_task_manager():
 _MACRO_ACTIONS = {
     "double_fist":        lambda: pyautogui.hotkey("ctrl", "a"),
     "double_thumbs_up":   lambda: pyautogui.hotkey("win", "up"),
-    "double_peace":       lambda: pyautogui.hotkey("ctrl", "shift", "j"),
+    "double_peace":       lambda: None,   # DISABLED — peace_sign = scroll only
     "browser_launch":     _open_browser,
     "file_manager":       _open_file_manager,
     "lock_screen":        _lock_screen,
@@ -209,7 +210,9 @@ class MacroEngine:
         self._macros  = self._load(macros)
         self._history: deque = deque(maxlen=8)   # (gesture, timestamp)
         self._last_macro_t: float = 0.0
-        self._macro_cooldown: float = 1.0        # secs between macro fires
+        self._macro_cooldown: float = 2.5        # global secs between ANY macro fires
+        self._per_macro_t: Dict[str, float] = {} # per-macro last fired time
+        self._per_macro_cd: float = 3.0          # per-macro cooldown (prevents spam)
         log.info(f"MacroEngine ready — {len(self._macros)} macros loaded")
 
     # ── public ────────────────────────────────────────────
@@ -275,6 +278,7 @@ class MacroEngine:
             self._history.popleft()
 
     def _match(self, now: float) -> Optional[str]:
+        # Global cooldown: no macro within 2.5s of ANY macro
         if now - self._last_macro_t < self._macro_cooldown:
             return None
 
@@ -282,9 +286,14 @@ class MacroEngine:
         history_times    = [t for _, t in self._history]
 
         for macro in self._macros:
+            # Skip disabled macros
+            if macro.get("disabled", False):
+                continue
+
             seq     = macro["sequence"]
             max_gap = macro.get("max_gap", 1.0)
             n       = len(seq)
+            name    = macro["name"]
 
             if len(history_gestures) < n:
                 continue
@@ -301,9 +310,17 @@ class MacroEngine:
                 tail_t[k+1] - tail_t[k] <= max_gap
                 for k in range(n - 1)
             )
-            if valid:
-                self._last_macro_t = now
-                return macro["name"]
+            if not valid:
+                continue
+
+            # Per-macro cooldown: this specific macro can't fire again within 3s
+            last_this = self._per_macro_t.get(name, 0.0)
+            if now - last_this < self._per_macro_cd:
+                continue
+
+            self._last_macro_t = now
+            self._per_macro_t[name] = now
+            return name
 
         return None
 

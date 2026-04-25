@@ -17,24 +17,22 @@ Accuracy improvements in this version
 
 Daily-life gesture set (16 gestures)
 ──────────────────────────────────────
-  pointing        → cursor mode           (index up, others folded)
-  pinch           → left click            (thumb ≈ index)
-  open_palm       → pause/play           (all extended)
-  closed_fist     → confirm/Enter        (all folded, no thumb direction)
-  thumbs_up       → accept              (thumb up, others folded)
-  thumbs_down     → reject              (thumb down, others folded)
-  peace_sign      → screenshot          (index + middle up)
-  three_fingers   → volume up           (index + middle + ring)
-  four_fingers    → volume down         (all except thumb)
-  swipe_left      → previous/back       (motion)
-  swipe_right     → next/forward        (motion)
-  swipe_up        → scroll up           (motion)
-  swipe_down      → scroll down         (motion)
-  circular_cw     → refresh/reload      (pointing circular motion CW)
-  circular_ccw    → undo                (pointing circular motion CCW)
-  pinch_in        → zoom out            (pinch shrinking)
-  pinch_out       → zoom in             (pinch growing)
-  wave            → cancel              (oscillation)
+  pointing        → cursor mode + SWIPE L/R  (index up, others folded)
+  pinch           → left click               (thumb ≈ index)
+  open_palm       → pause/play               (all extended)
+  closed_fist     → confirm/Enter            (all folded, no thumb direction)
+  thumbs_up       → accept                   (thumb up, others folded)
+  thumbs_down     → reject                   (thumb down, others folded)
+  peace_sign      → V-SIGN: SCROLL UP/DOWN   (index + middle up) ✌️
+  three_fingers   → volume up                (index + middle + ring)
+  four_fingers    → volume down              (all except thumb)
+  swipe_left      → previous/back     ☝️ POINTING + move LEFT
+  swipe_right     → next/forward      ☝️ POINTING + move RIGHT
+  swipe_up        → scroll up         ✌️ V-SIGN  + move UP
+  swipe_down      → scroll down       ✌️ V-SIGN  + move DOWN
+  circular_cw     → refresh/reload           (pointing circular motion CW)
+  circular_ccw    → undo                     (pointing circular motion CCW)
+  wave            → cancel                   (oscillation)
 """
 
 import math
@@ -70,6 +68,8 @@ _HOLD_EXEMPT = {
     "peace_sign", # scroll U/D trigger shape (no hold static action)
     "swipe_left", "swipe_right", "swipe_up", "swipe_down",
     "circular_cw", "circular_ccw", "wave",
+    # Pinch fires instantly — click/select must feel immediate
+    "pinch",
     "none", "unknown", "",
 }
 
@@ -133,7 +133,8 @@ class GestureResult:
     cursor_y:         int   = 0
     index_tip:        Tuple[float, float] = (0.0, 0.0)
     annotated_frame:  Optional[np.ndarray] = None
-    two_hand_gesture: str   = ""
+    two_hand_gesture: str   = ""      # only set when zoom/cross FIRES (not every frame)
+    two_hand_active:  bool  = False   # True whenever 2 hands are visible (suppress single-hand)
 
 
 # ══════════════════════════════════════════════════════════
@@ -223,14 +224,15 @@ def classify_gesture(lms, prev_pinch_norm: float = 0.5) -> Tuple[str, float]:
     t, i, m, r, p = _states(lms)
     pinch_n = _pinch_norm(lms)     # normalised 0–1
 
-    # ── pinch / ok (high priority — very tight distance) ──
-    if pinch_n < 0.16:         # tightened: was 0.18 (reduces false triggers)
+    # ── pinch / ok (high priority) ─────────────────────────────────────
+    # Raised threshold to 0.20 → easier to pinch naturally without straining
+    if pinch_n < 0.20:
         if m and r and p:
             return "ok_sign", 0.90      # thumb+index circle, rest extended
         if i and not m and not r:
-            return "pinch", 0.92        # click
+            return "pinch", 0.93        # click / select
         if not i and not m:
-            return "pinch", 0.88
+            return "pinch", 0.90        # click / select (all fingers folded)
 
     # ── open palm (all 5 extended) ───────────────────────────────────
     if t and i and m and r and p:
@@ -244,9 +246,10 @@ def classify_gesture(lms, prev_pinch_norm: float = 0.5) -> Tuple[str, float]:
     if i and m and r and not p and not t:
         return "three_fingers", 0.85
 
-    # ── peace sign (index+middle, ring+pinky down) ────────
+    # ── peace sign / V-sign (index+middle up, ring+pinky down) ──────────
+    # Accept thumb in any state — natural hand position while making V-sign
     if i and m and not r and not p:
-        return "peace_sign", 0.85
+        return "peace_sign", 0.87
 
     # ── pointing (only index up, others clearly folded) ───
     if i and not m and not r and not p:
@@ -372,8 +375,16 @@ class HandEngine:
         self._last_gest_t    = 0.0
         self._gest_cd        = gesture_cooldown_s
 
-        # swipe history: (x, y, t)
-        self._wrist_hist: deque = deque(maxlen=20)
+        # ── PINCH / CLICK state ──────────────────────────────────────────
+        self._pinch_active:   bool  = False   # True while thumb≈index
+        self._pinch_start_t:  float = 0.0     # time pinch began
+        self._pinch_drag:     bool  = False   # True once drag started
+        _DRAG_HOLD_S          = 0.55          # seconds held to start drag
+        self._DRAG_HOLD_S     = _DRAG_HOLD_S
+
+        # motion tracking history: (x, y, t)
+        # Uses index-tip position for wider range of movement detection
+        self._wrist_hist: deque = deque(maxlen=30)  # expanded buffer
 
         # normalised pinch history
         self._prev_pinch_norm: float = 0.5
@@ -386,11 +397,13 @@ class HandEngine:
         self._wave_last_x: float = 0.0
         self._wave_dirs:   List[str] = []
 
-        # ── TWO-HAND ZOOM state ─────────────────────────────
-        self._two_hand_dist_hist: deque = deque(maxlen=10)
+        # ── TWO-HAND ZOOM state ────────────────────────────────────────
+        # History stores (avg_dist, timestamp)
+        self._two_hand_dist_hist: deque = deque(maxlen=20)  # expanded buffer
         self._prev_two_hand_dist: float  = -1.0
         self._zoom_cooldown_t: float = 0.0
-        self._zoom_cd = 0.6
+        self._zoom_cd = 0.35           # reduced: snappier zoom response
+        self._zoom_step_count: int = 1 # proportional presses per fire
 
         # ── TWO-HAND CROSS (X) state ────────────────────────
         # Crossed = Right hand wrist is to the LEFT of Left hand wrist
@@ -429,8 +442,18 @@ class HandEngine:
             gesture, conf = classify_gesture(hand, self._prev_pinch_norm)
 
             # ── dynamic gesture overrides ──────────────────────────────────
-            wx = hand[WRIST].x
-            wy = hand[WRIST].y
+            # Track INDEX TIP (not wrist) — gives ~2-3x more motion range
+            # for reliable swipe/scroll detection
+            _itip_lm  = hand[INDEX_TIP]
+            _mtip_lm  = hand[MIDDLE_TIP]
+            # Use midpoint of index+middle tips for V-sign scroll,
+            # or pure index tip for pointing swipe
+            if gesture == "peace_sign":
+                wx = (_itip_lm.x + _mtip_lm.x) / 2.0
+                wy = (_itip_lm.y + _mtip_lm.y) / 2.0
+            else:
+                wx = _itip_lm.x
+                wy = _itip_lm.y
             self._wrist_hist.append((wx, wy, now))
 
             swipe = self._detect_swipe(now, gesture)
@@ -476,51 +499,62 @@ class HandEngine:
 
             # ── two-hand gestures ─────────────────────────────────────────
             if result.hand_count >= 2:
+                result.two_hand_active = True   # suppress single-hand OS actions downstream
                 hand2 = det.hand_landmarks[1]
                 g2, _ = classify_gesture(hand2, 0.5)
 
-                # generic combo label (for logging)
-                if g2 not in ("unknown", ""):
-                    combo_parts = [gesture, g2]
-                    if hd and len(hd) >= 2:
-                        h0 = hd[0][0].category_name if hd[0] else "Right"
-                        h1 = hd[1][0].category_name if hd[1] else "Left"
-                        if h0 == "Right" and h1 == "Left":
-                            combo_parts = [g2, gesture]
-                    result.two_hand_gesture = "+".join(combo_parts)
-                    self._draw_hand(frame, hand2, w, h, hd[1:] if len(hd) > 1 else [])
+                # CRITICAL FIX: Do NOT set result.two_hand_gesture here every frame.
+                # It is ONLY set when zoom / cross actually fires below.
+                # Setting it every frame caused 30fps signal spam.
+                # Just always draw the second hand skeleton for visual feedback.
+                self._draw_hand(frame, hand2, w, h, hd[1:] if len(hd) > 1 else [])
 
-                # ── Two-hand ZOOM (both open_palm or four_fingers) ─────────
-                # Measure distance between index-fingertips of both hands.
-                # Spread apart = zoom in, bring together = zoom out.
+                # ── Two-hand ZOOM (both open_palm or four_fingers) ───────────
+                # ACCURACY: Measure average distance across ALL 5 fingertip
+                # pairs (thumb-thumb, index-index, ... pinky-pinky). This is
+                # 5× more stable than a single index-tip measurement.
                 both_open = (
                     gesture in ("open_palm", "four_fingers") and
                     g2      in ("open_palm", "four_fingers")
                 )
                 if both_open:
-                    t0 = hand[INDEX_TIP]
-                    t1 = hand2[INDEX_TIP]
-                    dist = _dist2((t0.x, t0.y), (t1.x, t1.y))
+                    _TIPS = [THUMB_TIP, INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP]
+                    dists = [
+                        _dist2((hand[tid].x, hand[tid].y),
+                               (hand2[tid].x, hand2[tid].y))
+                        for tid in _TIPS
+                    ]
+                    dist = sum(dists) / len(dists)   # average of 5 pairs
                     self._two_hand_dist_hist.append((dist, now))
 
                     n = len(self._two_hand_dist_hist)
-                    if (self._prev_two_hand_dist > 0 and n >= 5 and
+                    if (self._prev_two_hand_dist > 0 and n >= 8 and
                             now - self._zoom_cooldown_t > self._zoom_cd):
 
                         recent = list(self._two_hand_dist_hist)
-                        old_d  = sum(x[0] for x in recent[:3]) / 3
-                        new_d  = sum(x[0] for x in recent[-3:]) / 3
+                        # Compare oldest 4 vs newest 4 for a stable delta
+                        old_d  = sum(x[0] for x in recent[:4]) / 4
+                        new_d  = sum(x[0] for x in recent[-4:]) / 4
                         delta  = new_d - old_d
 
-                        if delta > 0.055:         # fingertips APART  → zoom in
+                        # Dead-zone: ignore deltas smaller than 0.030
+                        # (filters out natural hand tremor / breathing sway)
+                        DEAD_ZONE = 0.030
+
+                        if delta > DEAD_ZONE:         # hands APART → zoom in
+                            # Proportional: bigger spread = more zoom steps
+                            steps = min(int(delta / 0.025), 3)
+                            self._zoom_step_count = max(steps, 1)
                             result.two_hand_gesture = "two_hand_zoom_in"
-                            result.confidence = 0.88
+                            result.confidence = 0.92
                             result.confirmed  = True
                             self._zoom_cooldown_t = now
                             self._two_hand_dist_hist.clear()
-                        elif delta < -0.055:      # fingertips TOGETHER → zoom out
+                        elif delta < -DEAD_ZONE:      # hands TOGETHER → zoom out
+                            steps = min(int(abs(delta) / 0.025), 3)
+                            self._zoom_step_count = max(steps, 1)
                             result.two_hand_gesture = "two_hand_zoom_out"
-                            result.confidence = 0.88
+                            result.confidence = 0.92
                             result.confirmed  = True
                             self._zoom_cooldown_t = now
                             self._two_hand_dist_hist.clear()
@@ -606,10 +640,28 @@ class HandEngine:
     # ── internal ──────────────────────────────────────────
 
     def _handle_cursor(self, lms, gesture, result, now):
-        idx  = lms[INDEX_TIP]
+        """
+        Cursor control + pinch-to-click / pinch-to-drag.
+
+        Pinch behaviour
+        ───────────────
+        • Finger together (pinch_n < 0.20)   → gesture == "pinch"
+        • On first frame of pinch            → LEFT CLICK at current cursor pos
+        • Pinch held > 0.55 s               → DRAG mode (mouseDown until release)
+        • Fingers open again                 → click released / drag dropped
+
+        Cursor follows the INDEX TIP in ALL modes (pointing AND pinch)
+        so you can aim, then pinch to click — no mode switch needed.
+        """
+        idx    = lms[INDEX_TIP]
+        thumb  = lms[THUMB_TIP]
         MARGIN = 0.15
-        nx = max(0.0, min(1.0, (idx.x - MARGIN) / (1 - 2*MARGIN)))
-        ny = max(0.0, min(1.0, (idx.y - MARGIN) / (1 - 2*MARGIN)))
+
+        # Use midpoint of thumb+index as click position (feels more natural)
+        cx_norm = (idx.x + thumb.x) / 2.0
+        cy_norm = (idx.y + thumb.y) / 2.0
+        nx = max(0.0, min(1.0, (cx_norm - MARGIN) / (1 - 2*MARGIN)))
+        ny = max(0.0, min(1.0, (cy_norm - MARGIN) / (1 - 2*MARGIN)))
         tx = int(nx * SCREEN_W)
         ty = int(ny * SCREEN_H)
         result.cursor_x = tx
@@ -618,36 +670,71 @@ class HandEngine:
         if gesture == "pointing":
             self._cursor_active = True
             self._mouse.move(tx, ty)
+            # Release any ongoing drag when user switches to pointing
+            if self._pinch_drag:
+                pyautogui.mouseUp()
+                self._pinch_drag   = False
+                self._pinch_active = False
+
         elif gesture == "pinch":
-            # Pinch ALWAYS clicks — no need to enter pointing/cursor mode first
-            if now - self._last_click_t > self._click_cd:
-                pyautogui.click()
-                self._last_click_t = now
-        elif gesture in ("open_palm", "closed_fist"):
-            self._cursor_active = False
+            self._cursor_active = True
+            # Always keep cursor on the pinch midpoint
+            self._mouse.move(tx, ty)
+
+            if not self._pinch_active:
+                # ── Pinch just closed → LEFT CLICK ──────────────────────
+                self._pinch_active  = True
+                self._pinch_start_t = now
+                self._pinch_drag    = False
+                if now - self._last_click_t > self._click_cd:
+                    pyautogui.click()
+                    self._last_click_t = now
+            else:
+                # ── Pinch held continuously ──────────────────────────────
+                held = now - self._pinch_start_t
+                if held >= self._DRAG_HOLD_S and not self._pinch_drag:
+                    # Transition to DRAG: press and hold the mouse button
+                    pyautogui.mouseDown()
+                    self._pinch_drag = True
+                elif self._pinch_drag:
+                    # Dragging — cursor already moved above, nothing extra needed
+                    pass
+
+        else:
+            # ── Pinch released / gesture changed ────────────────────────
+            if self._pinch_active:
+                if self._pinch_drag:
+                    pyautogui.mouseUp()   # drop whatever was being dragged
+                self._pinch_drag   = False
+                self._pinch_active = False
+
+            if gesture in ("open_palm", "closed_fist"):
+                self._cursor_active = False
 
     def _detect_swipe(self, now: float, gesture: str = "") -> Optional[str]:
         """
-        UNIQUE gesture-gated swipe/scroll detection.
+        ACCURATE gesture-gated swipe/scroll detection.
 
-        Each direction uses a DEDICATED hand shape with NO static hold-guard
-        action, so swipe and scroll NEVER conflict with other gestures.
+        Sign guide
+        ──────────
+          ☝️  POINTING  (only index up)  →  SWIPE LEFT / RIGHT
+              Move hand LEFT or RIGHT quickly while pointing.
+              Thresholds: |dx| ≥ 0.07, |vx| ≥ 0.18, horizontal dominant 1.4×
 
-          SWIPE LEFT / RIGHT  — hand shape: POINTING (☝️ index finger only)
-            Move your wrist quickly left or right while pointing.
-            The cursor will also move, but the fast snap overrides into a swipe.
-            Thresholds: dx ≥ 0.10, velocity ≥ 0.22, dominant axis 1.5×
+          ✌️  V-SIGN / PEACE (index + middle up, ring + pinky down)
+              →  SCROLL UP / DOWN
+              Move hand UP or DOWN while making a V-sign.
+              Thresholds: |dy| ≥ 0.06, |vy| ≥ 0.12, vertical dominant 1.3×
 
-          SCROLL UP / DOWN  — hand shape: PEACE SIGN (✌️ index + middle)
-            Move your wrist up or down while making a V-sign.
-            This shape has NO static action so scroll fires cleanly.
-            Thresholds: dy ≥ 0.09, velocity ≥ 0.16, dominant axis 1.4×
+          Any other shape — very strict fallback (≥0.20) to avoid accidents.
 
-          FALLBACK (any other shape)  — very strict to prevent accidents.
+        Note: MediaPipe image coords have y increasing downward, so:
+          dy > 0  means hand moved DOWN in camera  → scroll DOWN
+          dy < 0  means hand moved UP   in camera  → scroll UP
         """
-        # Use a slightly wider time window to capture slower deliberate motions
+        # Capture recent motion samples within a 0.75s window
         recent = [(x, y, t) for x, y, t in self._wrist_hist
-                  if now - t < 0.65]
+                  if now - t < 0.75]
         if len(recent) < 4:
             return None
 
@@ -660,26 +747,27 @@ class HandEngine:
         vx = dx / dt
         vy = dy / dt
 
-        # ── SWIPE LEFT / RIGHT: pointing (index only) + horizontal snap ──────
-        # pointing is hold-exempt — no static action fires before this check.
+        # ── SWIPE LEFT / RIGHT: ☝️ pointing (index only) ─────────────────────
         if gesture == "pointing":
-            if abs(dx) >= 0.10 and abs(vx) >= 0.22 and abs(dx) > abs(dy) * 1.5:
+            # Lower threshold: index-tip tracking gives wider motion range
+            if abs(dx) >= 0.07 and abs(vx) >= 0.18 and abs(dx) > abs(dy) * 1.4:
                 self._wrist_hist.clear()
                 return "swipe_right" if dx > 0 else "swipe_left"
 
-        # ── SCROLL UP / DOWN: peace_sign (V-sign) + vertical movement ───────
-        # peace_sign is hold-exempt — no screenshot action fires before this.
+        # ── SCROLL UP / DOWN: ✌️ V-sign / peace_sign ─────────────────────────
         elif gesture == "peace_sign":
-            if abs(dy) >= 0.09 and abs(vy) >= 0.16 and abs(dy) > abs(dx) * 1.4:
+            # Lower threshold: midpoint of two fingertips gives smooth tracking
+            if abs(dy) >= 0.06 and abs(vy) >= 0.12 and abs(dy) > abs(dx) * 1.3:
                 self._wrist_hist.clear()
+                # dy > 0 = hand moved down in camera = scroll DOWN
                 return "swipe_down" if dy > 0 else "swipe_up"
 
-        # ── FALLBACK: any other shape — very strict to avoid accidents ───────
+        # ── FALLBACK: any other shape — strict to avoid accidental fires ──────
         else:
-            if abs(dx) >= 0.22 and abs(vx) >= 0.40 and abs(dx) > abs(dy) * 2.5:
+            if abs(dx) >= 0.20 and abs(vx) >= 0.38 and abs(dx) > abs(dy) * 2.5:
                 self._wrist_hist.clear()
                 return "swipe_right" if dx > 0 else "swipe_left"
-            if abs(dy) >= 0.22 and abs(vy) >= 0.40 and abs(dy) > abs(dx) * 2.5:
+            if abs(dy) >= 0.20 and abs(vy) >= 0.38 and abs(dy) > abs(dx) * 2.5:
                 self._wrist_hist.clear()
                 return "swipe_down" if dy > 0 else "swipe_up"
 
@@ -733,31 +821,31 @@ class HandEngine:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, CLR_PURPLE, 2)
 
     _HUD = {
-        # pointing = DUAL PURPOSE: cursor move + swipe L/R trigger
-        "pointing":      ("CURSOR | SWIPE \u2194",  CLR_PURPLE),
-        "pinch":         ("CLICK",              CLR_GREEN),
-        # peace_sign = DEDICATED SCROLL trigger (no screenshot anymore)
-        "peace_sign":    ("SCROLL \u2195 (V-sign)", CLR_CYAN),
-        "open_palm":     ("PAUSE/PLAY",         CLR_WHITE),
-        "closed_fist":   ("CONFIRM",            CLR_GREEN),
-        "thumbs_up":     ("\u2713 ACCEPT",           CLR_GREEN),
-        "thumbs_down":   ("\u2717 REJECT",           CLR_RED),
-        "three_fingers": ("VOL UP\u25b2",            CLR_GREEN),
-        "four_fingers":  ("VOL DOWN\u25bc",          CLR_AMBER),
-        "swipe_left":    ("\u25c4 PREVIOUS",          CLR_PURPLE),
-        "swipe_right":   ("NEXT \u25ba",             CLR_PURPLE),
-        "swipe_up":      ("\u25b2 SCROLL UP",        CLR_CYAN),
-        "swipe_down":    ("\u25bc SCROLL DOWN",      CLR_CYAN),
-        "circular_cw":   ("\u21bb REFRESH",          CLR_GREEN),
-        "circular_ccw":  ("\u21ba UNDO",             CLR_AMBER),
-        "pinch_in":      ("\u25c4 ZOOM OUT",         CLR_AMBER),
-        "pinch_out":     ("\u25ba ZOOM IN",          CLR_GREEN),
-        "wave":          ("\u2715 CANCEL",           CLR_RED),
-        "ok_sign":       ("SCREENSHOT",         CLR_AMBER),
-        "phone_sign":    ("SETTINGS",           CLR_GREEN),
+        # ☝️ pointing = DUAL PURPOSE: cursor move + SWIPE L/R trigger
+        "pointing":      ("\u261d POINT \u2194  SWIPE L/R",   CLR_PURPLE),
+        "pinch":         ("\U0001f90f PINCH = CLICK / DRAG",  CLR_GREEN),
+        # ✌️ peace_sign / V-sign = DEDICATED SCROLL trigger
+        "peace_sign":    ("\u270c V-SIGN \u2195  SCROLL U/D", CLR_CYAN),
+        "open_palm":     ("PAUSE/PLAY",               CLR_WHITE),
+        "closed_fist":   ("CONFIRM",                  CLR_GREEN),
+        "thumbs_up":     ("\u2713 ACCEPT",             CLR_GREEN),
+        "thumbs_down":   ("\u2717 REJECT",             CLR_RED),
+        "three_fingers": ("VOL UP\u25b2",              CLR_GREEN),
+        "four_fingers":  ("VOL DOWN\u25bc",            CLR_AMBER),
+        "swipe_left":    ("\u25c4 SWIPE LEFT",         CLR_PURPLE),
+        "swipe_right":   ("SWIPE RIGHT \u25ba",        CLR_PURPLE),
+        "swipe_up":      ("\u25b2 SCROLL UP",          CLR_CYAN),
+        "swipe_down":    ("\u25bc SCROLL DOWN",        CLR_CYAN),
+        "circular_cw":   ("\u21bb REFRESH",            CLR_GREEN),
+        "circular_ccw":  ("\u21ba UNDO",               CLR_AMBER),
+        "pinch_in":      ("\u25c4 ZOOM OUT",           CLR_AMBER),
+        "pinch_out":     ("\u25ba ZOOM IN",            CLR_GREEN),
+        "wave":          ("\u2715 CANCEL",             CLR_RED),
+        "ok_sign":       ("SCREENSHOT",               CLR_AMBER),
+        "phone_sign":    ("SETTINGS",                 CLR_GREEN),
         # Two hand gestures
-        "two_hand_zoom_in":  ("\u25ba\u25ba ZOOM IN [2H]",   CLR_GREEN),
-        "two_hand_zoom_out": ("\u25c4\u25c4 ZOOM OUT [2H]",  CLR_AMBER),
+        "two_hand_zoom_in":  ("\u25ba\u25ba ZOOM IN [2H]",    CLR_GREEN),
+        "two_hand_zoom_out": ("\u25c4\u25c4 ZOOM OUT [2H]",   CLR_AMBER),
         "two_hand_cross":    ("\u2715 CROSS \u2192 MIN/MAX [2H]", CLR_RED),
     }
 
@@ -785,6 +873,26 @@ class HandEngine:
         cv2.addWeighted(ov, 0.65, frame, 0.35, 0, frame)
         cv2.rectangle(frame, (bx, by), (bx+tw+pad*2, by+text_h+pad*2), fade_c, 2)
         cv2.putText(frame, label_text, (bx+pad, by+text_h+pad//2), font, fs, fade_c, th_)
+
+        # ── pinch drag progress bar ──────────────────────────────────────
+        # Shows how long the pinch has been held; fills → DRAG ACTIVE
+        if result.name == "pinch" and self._pinch_active:
+            held = time.time() - self._pinch_start_t
+            drag_prog = min(held / self._DRAG_HOLD_S, 1.0)
+            bar_total = tw + pad * 2
+            bar_filled = int(bar_total * drag_prog)
+            bar_y = by + text_h + pad * 2 + 5
+            # background
+            cv2.rectangle(frame, (bx, bar_y), (bx + bar_total, bar_y + 6),
+                          (40, 35, 30), -1)
+            # fill (amber → red as it fills)
+            bar_col = CLR_RED if drag_prog >= 1.0 else CLR_AMBER
+            cv2.rectangle(frame, (bx, bar_y), (bx + bar_filled, bar_y + 6),
+                          bar_col, -1)
+            if self._pinch_drag:
+                cv2.putText(frame, "DRAG ACTIVE",
+                            (bx + pad, bar_y + 22),
+                            font, 0.50, CLR_RED, 2)
 
         # ── hold-guard progress arc ──
         if result.name not in _HOLD_EXEMPT and result.name not in ("none","unknown",""):

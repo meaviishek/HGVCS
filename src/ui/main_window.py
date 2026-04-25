@@ -1,3 +1,8 @@
+# AI chat + knowledge tabs (new)
+from src.ui.chat_tab import ChatTab
+from src.ui.knowledge_tab import KnowledgeTab
+from src.voice.knowledge_store import KnowledgeStore
+
 """
 HGVCS Main Window
 Full-featured dark-themed UI:
@@ -517,7 +522,7 @@ class ToggleButton(QPushButton):
 class HandCaptureThread(QThread):
     frame_ready      = pyqtSignal(object, object)
     camera_error     = pyqtSignal(str)
-    two_hand_gesture = pyqtSignal(str, float)  # for two-hand combos
+    two_hand_gesture = pyqtSignal(str, float, int)  # combo, confidence, zoom_steps
 
     def __init__(self, camera_id=0, cursor_enabled=True):
         # NOTE: NO parent=self to prevent Qt from destroying thread with widget
@@ -601,7 +606,13 @@ class HandCaptureThread(QThread):
                 if ret:
                     self._fail_count  = 0
                     self._last_frame_t = time.time()
-                    result = self._engine.process(frame)
+                    try:
+                        result = self._engine.process(frame)
+                    except RuntimeError:
+                        # MediaPipe executor shut down during app exit — exit loop cleanly
+                        break
+                    except Exception:
+                        continue
 
                     # Gesture signals are ALWAYS emitted regardless of display pause
                     self.frame_ready.emit(
@@ -610,9 +621,11 @@ class HandCaptureThread(QThread):
                     )
                     # Emit two-hand gesture if detected
                     if result.two_hand_gesture:
+                        zoom_steps = getattr(self._engine, "_zoom_step_count", 1)
                         self.two_hand_gesture.emit(
                             result.two_hand_gesture,
-                            result.confidence
+                            result.confidence,
+                            zoom_steps
                         )
                 else:
                     self._fail_count += 1
@@ -644,7 +657,7 @@ class HandCaptureThread(QThread):
 class CameraWidget(QWidget):
     status_changed     = pyqtSignal(str, str)
     gesture_detected   = pyqtSignal(str, float)
-    two_hand_detected  = pyqtSignal(str, float)
+    two_hand_detected  = pyqtSignal(str, float, int)  # combo, conf, zoom_steps
 
     def __init__(self, camera_id=0, cursor_enabled=True, parent=None):
         super().__init__(parent)
@@ -672,9 +685,9 @@ class CameraWidget(QWidget):
             self._error_msg = "opencv-python not installed"
             self._anim_timer.start(33)
 
-    def _on_two_hand(self, combo: str, conf: float):
+    def _on_two_hand(self, combo: str, conf: float, zoom_steps: int = 1):
         """Forward two-hand combo gesture to dashboard."""
-        self.two_hand_detected.emit(combo, conf)
+        self.two_hand_detected.emit(combo, conf, zoom_steps)
 
     def _on_frame(self, bgr, gesture_result=None):
         # bgr may be None when display is paused — still process gesture signals
@@ -699,9 +712,14 @@ class CameraWidget(QWidget):
             self.update()
 
         # Always forward confirmed gesture signals, even when display is paused
-        if gesture_result is not None and gesture_result.name not in ("none", "unknown", ""):
-            if gesture_result.confirmed:
-                self.gesture_detected.emit(gesture_result.name, gesture_result.confidence)
+        # SUPPRESSION: if two hands are visible, ONLY two_hand_gesture signals
+        # are dispatched (via the separate two_hand_gesture signal below).
+        # Single-hand actions are blocked to prevent accidental volume/swipe/etc.
+        if (gesture_result is not None
+                and gesture_result.name not in ("none", "unknown", "")
+                and gesture_result.confirmed
+                and not gesture_result.two_hand_active):   # <-- key guard
+            self.gesture_detected.emit(gesture_result.name, gesture_result.confidence)
 
     def _on_error(self, msg):
         self._error_msg = msg
@@ -1455,15 +1473,16 @@ class DashboardTab(QWidget):
             self._gesture_ctrl.on_gesture(name, confidence, two_hand, confirmed=True)
 
 
-    def _on_two_hand_detected(self, name: str, confidence: float):
+    def _on_two_hand_detected(self, name: str, confidence: float,
+                               zoom_steps: int = 1):
         """
-        Called when a two-hand semantic gesture is detected (zoom in/out).
+        Called when a two-hand semantic gesture is detected (zoom in/out, cross, etc.).
         Pass 'name' as both gesture_name and two_hand so that
         GestureController routes it through execute_two_hand().
         """
         # Log it visibly
         label = name.replace("_", " ").title()
-        self._add_log(f"\U0001f932  Two-hand: {label}  ({confidence*100:.0f}%)", "ok")
+        self._add_log(f"\U0001f932  Two-hand: {label}  ({confidence*100:.0f}%)  steps={zoom_steps}", "ok")
         self._gesture_count += 1
         self._cards["gestures"].set_value(str(self._gesture_count))
         # Dispatch through gesture controller with two_hand=name
@@ -1473,7 +1492,8 @@ class DashboardTab(QWidget):
                 "none",       # single-hand gesture (ignored)
                 confidence,
                 name,         # two_hand = the semantic combo name
-                confirmed=True
+                confirmed=True,
+                zoom_steps=zoom_steps,
             )
 
     def _on_cam_status(self, message, level):
@@ -2237,6 +2257,8 @@ class Sidebar(QWidget):
             ("🌐", "Network",      2),
             ("📊", "Analytics",   3),
             ("⚙️", "Settings",     4),
+            ("🤖", "Chat with V",  5),
+            ("📚", "Knowledge",    6),
         ]
         for icon, label, idx in nav_items:
             btn = QPushButton(f"  {icon}  {label}")
@@ -2303,6 +2325,13 @@ class MainWindow(QMainWindow):
         self.system_controller  = system_controller
         self.profile_manager    = profile_manager
         self.macro_engine       = macro_engine
+        # Persistent knowledge store (chat + voice)
+        try:
+            self.knowledge_store = KnowledgeStore()
+        except Exception as _ke:
+            import logging
+            logging.getLogger("hgvcs.ui").warning(f"KnowledgeStore init failed: {_ke}")
+            self.knowledge_store = None
 
         self._apply_palette()
         self.setWindowTitle("HGVCS – Hand Gesture & Voice Control System")
@@ -2356,11 +2385,16 @@ class MainWindow(QMainWindow):
         self._guide_tab = GestureGuideTab()
         self._set_tab   = SettingsTab(self.config)
 
+        self._chat_tab  = ChatTab()
+        self._know_tab  = KnowledgeTab()
+
         self._tabs.addTab(self._dash_tab,       "Dashboard")
         self._tabs.addTab(self._guide_tab,      "Gestures")
         self._tabs.addTab(self._net_tab,        "Network")
         self._tabs.addTab(self._analytics_tab,  "Analytics")
         self._tabs.addTab(self._set_tab,        "Settings")
+        self._tabs.addTab(self._chat_tab,       "Chat")
+        self._tabs.addTab(self._know_tab,       "Knowledge")
         stack_lay.addWidget(self._tabs, 1)
 
         # status bar
@@ -2421,6 +2455,32 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 import logging
                 logging.getLogger("hgvcs.ui").warning(f"Voice UI wire error: {e}")
+
+        # Wire KnowledgeStore into VoiceController
+        if hasattr(self, "knowledge_store") and self.knowledge_store:
+            if self.voice_controller and hasattr(self.voice_controller, "set_knowledge_store"):
+                try:
+                    self.voice_controller.set_knowledge_store(self.knowledge_store)
+                except Exception as _ke:
+                    pass
+            # Wire KnowledgeTab
+            if hasattr(self, "_know_tab"):
+                try:
+                    self._know_tab.set_knowledge_store(self.knowledge_store)
+                except Exception as _kwe:
+                    pass
+            # Wire ChatTab: knowledge + voice_controller + TTS
+            if hasattr(self, "_chat_tab"):
+                try:
+                    self._chat_tab.set_knowledge_store(self.knowledge_store)
+                    if self.voice_controller:
+                        self._chat_tab.set_voice_controller(self.voice_controller)
+                        # Wire TTS engine so Listen button works
+                        _tts = getattr(self.voice_controller, '_tts', None)
+                        if _tts:
+                            self._chat_tab.set_tts_engine(_tts)
+                except Exception as _cke:
+                    pass
 
     def _safe_incoming(self, filename: str, size: int, ip: str) -> bool:
         """Run incoming-file dialog on Qt thread (NetworkManager is off-thread)."""

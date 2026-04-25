@@ -31,23 +31,46 @@ except ImportError:
     _SD_OK = False
     log.warning("sounddevice not installed — microphone disabled")
 
-# ── whisper ────────────────────────────────────────────────
+# ── whisper backend: try faster-whisper first (no PyTorch/AVX) ───────────
+_FASTER_WHISPER = False
+_OPENAI_WHISPER = False
+
+# Pre-load torch before ctranslate2 imports it — prevents DLL-state corruption
+# from mediapipe's TF probe running first
 try:
-    import whisper as _whisper_mod
-    _WHISPER_OK = True
+    import torch as _torch_pre  # noqa: F401
+except Exception:
+    pass  # if torch itself fails, faster-whisper will also fail — handled below
+
+try:
+    from faster_whisper import WhisperModel as _FasterWhisperModel
+    _FASTER_WHISPER = True
+    log.info("Using faster-whisper backend (ctranslate2, no PyTorch required)")
 except ImportError:
-    _WHISPER_OK = False
-    log.warning("openai-whisper not installed — STT disabled")
+    log.debug("faster-whisper not installed")
+except Exception as _e:
+    log.warning(f"faster-whisper unavailable: {_e}")
+
+if not _FASTER_WHISPER:
+    try:
+        import whisper as _whisper_mod
+        _OPENAI_WHISPER = True
+        log.info("Using openai-whisper backend (torch-based)")
+    except Exception as _e:
+        log.warning(f"openai-whisper unavailable: {_e}")
+
+_WHISPER_OK = _FASTER_WHISPER or _OPENAI_WHISPER
+
 
 # Audio settings
 SAMPLE_RATE    = 16_000
 CHANNELS       = 1
 CHUNK_FRAMES   = 1600          # 100 ms chunks
-ENERGY_THRESH  = 0.012         # Raised back: filters keyboard/fan noise
-MIN_SPEECH_RMS = 0.020         # Must hit this level at least once to count as real speech
-SILENCE_CHUNKS = 12            # 1.2 s of silence = end of utterance
-MAX_RECORD_S   = 10            # Max utterance length (seconds)
-MIN_RECORD_CS  = 6             # Minimum chunks before we accept utterance (0.6 s)
+ENERGY_THRESH  = 0.018         # Raised: stronger filter for fan/keyboard noise
+MIN_SPEECH_RMS = 0.030         # Raised: only accept clearly audible speech
+SILENCE_CHUNKS = 10            # 1.0 s of silence = end of utterance
+MAX_RECORD_S   = 12            # Max utterance length (seconds)
+MIN_RECORD_CS  = 8             # Minimum chunks before we accept utterance (0.8 s)
 POST_WAKE_FLUSH_S = 1.0        # Flush audio after wake to skip any TTS playback
 TTS_GUARD_S       = 1.5        # Extra silence guard after TTS speech ends
 
@@ -116,26 +139,28 @@ class WakeWordDetector:
                  on_wake: callable = None,
                  on_speech: callable = None,
                  on_state_change: callable = None,
-                 whisper_model: str = "tiny.en",
+                 whisper_model: str = "tiny",
+                 cmd_model: str = "base",
                  always_awake: bool = True):
         self._on_wake         = on_wake or (lambda: None)
         self._on_speech       = on_speech or (lambda t: None)
         self._on_state_change = on_state_change or (lambda s: None)
+        # Wake-word model: fast/tiny — just needs to catch "hey v"
         self._model_name      = whisper_model
-        self._model           = None
+        # Command model: larger/more accurate — transcribes actual commands
+        self._cmd_model_name  = cmd_model
+        self._model           = None    # wake model
+        self._cmd_model       = None    # command model (loaded lazily)
         self._running         = False
         self._state           = "idle"
         self._always_awake    = always_awake
-        self._is_awake        = False   # True once user activated V (always_awake mode)
+        self._is_awake        = False
 
         self._audio_q: queue.Queue = queue.Queue(maxsize=300)
-        # event to skip straight to utterance capture (manual trigger)
         self._manual_evt = threading.Event()
-        # event: user asked V to sleep (re-enter idle detection)
         self._sleep_evt  = threading.Event()
-        # TTS guard: set True while V is speaking so we don't hear ourselves
         self._tts_active = False
-        self._tts_end_t  = 0.0   # timestamp when TTS finished
+        self._tts_end_t  = 0.0
 
     def notify_tts_start(self):
         """Call this when TTS starts speaking so mic is muted."""
@@ -189,16 +214,41 @@ class WakeWordDetector:
             pass
 
     def _load_and_listen(self):
-        log.info(f"Loading Whisper model: {self._model_name}")
+        log.info(f"Loading wake model: {self._model_name}")
         try:
-            self._model = _whisper_mod.load_model(self._model_name)
-            log.info("Whisper model loaded — listening for 'Hey V'")
+            if _FASTER_WHISPER:
+                # Wake model: tiny — fast for detecting 'hey v'
+                self._model = _FasterWhisperModel(
+                    self._model_name,
+                    device="cpu",
+                    compute_type="int8",
+                )
+                self._use_faster = True
+                log.info(f"Wake model '{self._model_name}' loaded (CPU/int8)")
+
+                # Command model: larger — more accurate for actual commands
+                log.info(f"Loading command model: {self._cmd_model_name}")
+                try:
+                    self._cmd_model = _FasterWhisperModel(
+                        self._cmd_model_name,
+                        device="cpu",
+                        compute_type="int8",
+                    )
+                    log.info(f"Command model '{self._cmd_model_name}' loaded (CPU/int8)")
+                except Exception as ce:
+                    log.warning(f"Command model failed, falling back to wake model: {ce}")
+                    self._cmd_model = self._model   # fallback
+            else:
+                self._model = _whisper_mod.load_model(self._model_name)
+                self._cmd_model = self._model
+                self._use_faster = False
+                log.info(f"Whisper model '{self._model_name}' loaded")
         except Exception as e:
             log.error(f"Whisper load failed: {e}")
             self._set_state("error")
             return
 
-        # ONE persistent stream — never close it while _running
+        # ONE persistent stream
         while self._running:
             try:
                 with sd.InputStream(
@@ -214,7 +264,7 @@ class WakeWordDetector:
             except Exception as e:
                 log.error(f"Audio stream error: {e} — retrying in 2 s")
                 self._set_state("error")
-                time.sleep(2)   # retry indefinitely
+                time.sleep(2)
 
     def _audio_callback(self, indata, frames, time_info, status):
         if status:
@@ -386,47 +436,88 @@ class WakeWordDetector:
         # After handling, return to idle momentarily so UI can update
         self._set_state("idle")
 
-    def _transcribe_wake(self, audio: np.ndarray) -> str:
-        """Whisper tuned for wake-word detection. Auto-detects language."""
-        if self._model is None:
+    def _transcribe(self, audio: np.ndarray, is_wake: bool) -> str:
+        """Unified transcribe using whichever backend loaded."""
+        model = self._model if is_wake else (self._cmd_model or self._model)
+        if model is None:
             return ""
+
+        # Initial prompt: primes the model with common command vocabulary
+        # Dramatically improves recognition of app names and action words
+        COMMAND_PROMPT = (
+            "open YouTube, open Chrome, open browser, search for, Google, "
+            "screenshot, scroll up, scroll down, volume up, volume down, "
+            "next slide, previous slide, close window, minimize, maximize, "
+            "mute, play, pause, switch app, lock screen, "
+            "upar, neeche, band karo, screenshot lo, volume badhao, "
+            "agli slide, pichli slide, browser kholo, dhundho"
+        )
+
         try:
-            result = self._model.transcribe(
-                audio,
-                language=None,             # auto-detect: handles Hindi/English mix
-                fp16=False,
-                condition_on_previous_text=False,
-                no_speech_threshold=0.35,  # less strict for short wake words
-                logprob_threshold=-2.5,
-                temperature=0.0,
-                word_timestamps=False,
-            )
-            return result.get("text", "").strip()
+            if getattr(self, "_use_faster", False):
+                if is_wake:
+                    # Wake: fast, tiny model, beam=1
+                    segments, _info = model.transcribe(
+                        audio,
+                        language=None,
+                        beam_size=1,
+                        vad_filter=True,
+                        vad_parameters={"min_silence_duration_ms": 400},
+                        condition_on_previous_text=False,
+                    )
+                else:
+                    # Command: larger model, beam=5, prompt for accuracy
+                    segments, _info = model.transcribe(
+                        audio,
+                        language=None,
+                        beam_size=5,
+                        best_of=5,
+                        initial_prompt=COMMAND_PROMPT,
+                        vad_filter=True,
+                        vad_parameters={"min_silence_duration_ms": 300},
+                        condition_on_previous_text=False,
+                        temperature=0.0,
+                    )
+                text = " ".join(seg.text for seg in segments).strip()
+            else:
+                # openai-whisper API
+                result = model.transcribe(
+                    audio,
+                    language=None,
+                    fp16=False,
+                    initial_prompt=None if is_wake else COMMAND_PROMPT,
+                    condition_on_previous_text=False,
+                    no_speech_threshold=0.35 if is_wake else 0.5,
+                    logprob_threshold=-2.5 if is_wake else -1.5,
+                    temperature=0.0,
+                    word_timestamps=False,
+                )
+                text = result.get("text", "").strip()
+
+            # Reject suspiciously short transcriptions (< 2 words) that aren't
+            # wake-word candidates — these are usually noise artifacts
+            if not is_wake and text:
+                words = text.split()
+                if len(words) < 2 and not any(
+                    kw in text.lower() for kw in [
+                        "screenshot", "mute", "pause", "play", "save", "copy",
+                        "paste", "undo", "redo", "maximize", "minimize",
+                        "sleep", "goodbye", "bye"
+                    ]
+                ):
+                    log.debug(f"Rejected short transcription: {text!r}")
+                    return ""
+
+            return text
+
         except Exception as e:
-            log.error(f"Whisper wake transcribe error: {e}")
+            log.error(f"Whisper transcribe error: {e}")
             return ""
+
+    def _transcribe_wake(self, audio: np.ndarray) -> str:
+        """Fast wake-word detection using tiny model."""
+        return self._transcribe(audio, is_wake=True)
 
     def _transcribe_command(self, audio: np.ndarray) -> str:
-        """Whisper tuned for full command transcription. Auto-detects language."""
-        if self._model is None:
-            return ""
-        try:
-            result = self._model.transcribe(
-                audio,
-                language=None,             # auto-detect Hindi / English / mixed
-                fp16=False,
-                condition_on_previous_text=False,
-                no_speech_threshold=0.5,
-                logprob_threshold=-1.5,
-                temperature=0.0,
-                word_timestamps=False,
-            )
-            text = result.get("text", "").strip()
-            lang = result.get("language", "en")
-            if lang not in ("en", "hi"):
-                log.debug(f"Detected language: {lang} — transcript: {text!r}")
-            return text
-        except Exception as e:
-            log.error(f"Whisper command transcribe error: {e}")
-            return ""
-
+        """Accurate command transcription using base model."""
+        return self._transcribe(audio, is_wake=False)
